@@ -1,0 +1,7 @@
+passwords.json
+
+# Zig build artifacts
+main
+main.o
+zig-out/
+.zig-cache/
