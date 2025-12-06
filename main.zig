@@ -3,6 +3,10 @@ const std = @import("std");
 const PasswordItem = struct { service_name: []const u8, user_id: []const u8, password: []const u8 };
 
 // TODO: ARENA PATTERN
+// TODO: USE trim() for retro compatibility
+// TODO: Encrypt json
+// TODO: Cover all json read/write checks
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
