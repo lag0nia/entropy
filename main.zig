@@ -6,6 +6,7 @@ const PasswordItem = struct { service_name: []const u8, user_id: []const u8, pas
 // TODO: USE trim() for retro compatibility
 // TODO: Encrypt json
 // TODO: Cover all json read/write checks
+// TODO FIRST:  Complete program :p
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
