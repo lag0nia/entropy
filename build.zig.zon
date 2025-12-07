@@ -1,0 +1,12 @@
+.{
+    .name = .password_manager,
+    .version = "0.15.2",
+    .dependencies = .{
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis.git#4d60d3492fa00fa28760dc823b0f4bf527f16a2d",
+            .hash = "vaxis-0.5.1-BWNV_CIyCQDMo4RMThsYxAA1is3p03DI0OGa2C4SypVH",
+        },
+    },
+    .paths = .{""},
+    .fingerprint = 0xd2ab74b61b2160f1,
+}
