@@ -16,33 +16,39 @@ pub fn main() !void {
     while (true) {
         std.debug.print("----------- WELCOME TO PASSWORD MANAGER -----------\n", .{});
         std.debug.print("1. Add a new password\n", .{});
-        std.debug.print("2. List all passwords\n", .{});
-        std.debug.print("3. Delete a password\n", .{});
-        std.debug.print("4. Exit\n", .{});
+        std.debug.print("2. Get a password\n", .{});
+        std.debug.print("3. Update a password\n", .{});
+        std.debug.print("4. Delete a password\n", .{});
+        std.debug.print("5. Export all passwords\n", .{});
+        std.debug.print("6. Exit\n", .{});
 
         std.debug.print("Please sir, enter your choice: ", .{});
-        const user_command = try get_input(allocator);
+        const user_command = try getInput(allocator);
 
         std.debug.print("\n\n\n", .{});
 
         if (std.mem.eql(u8, "1", user_command)) {
             std.debug.print("Please enter a service name: ", .{});
-            const service_name = try get_input(allocator);
+            const service_name = try getInput(allocator);
             std.debug.print("Please enter a user identification: ", .{});
-            const user_id = try get_input(allocator);
+            const user_id = try getInput(allocator);
 
             const password_item = PasswordItem{
                 .service_name = service_name,
                 .user_id = user_id,
-                .password = try get_random_password(allocator, 12),
+                .password = try setRandomPassword(allocator, 12),
             };
 
-            try update_passwords_list(allocator, password_item);
+            try updatePasswordList(allocator, password_item);
         } else if (std.mem.eql(u8, "2", user_command)) {
-            std.debug.print("List all passwords\n\n", .{});
+            try getPassword(allocator);
         } else if (std.mem.eql(u8, "3", user_command)) {
-            std.debug.print("Delete a password\n\n", .{});
+            std.debug.print("Update a password\n\n", .{});
         } else if (std.mem.eql(u8, "4", user_command)) {
+            std.debug.print("Delete a password\n\n", .{});
+        } else if (std.mem.eql(u8, "5", user_command)) {
+            std.debug.print("Export all passwords\n\n", .{});
+        } else if (std.mem.eql(u8, "6", user_command)) {
             std.debug.print("Have a good day sir :P\n\n", .{});
             break;
         } else {
@@ -51,7 +57,7 @@ pub fn main() !void {
     }
 }
 
-pub fn get_input(allocator: std.mem.Allocator) ![]u8 {
+pub fn getInput(allocator: std.mem.Allocator) ![]u8 {
     var buffer: [1024]u8 = undefined;
     var stdin = std.fs.File.stdin().reader(&buffer);
 
@@ -65,7 +71,7 @@ pub fn get_input(allocator: std.mem.Allocator) ![]u8 {
     }
 }
 
-pub fn get_random_password(allocator: std.mem.Allocator, word_number: u8) ![]const u8 {
+pub fn setRandomPassword(allocator: std.mem.Allocator, word_number: u8) ![]const u8 {
     var btc_words_pool = try std.fs.cwd().openFile("./english.txt", .{ .mode = .read_only });
     defer btc_words_pool.close();
 
@@ -88,7 +94,7 @@ pub fn get_random_password(allocator: std.mem.Allocator, word_number: u8) ![]con
     return password_final;
 }
 
-pub fn update_passwords_list(allocator: std.mem.Allocator, password_item: PasswordItem) !void {
+pub fn updatePasswordList(allocator: std.mem.Allocator, password_item: PasswordItem) !void {
     const file_path = "./passwords.json";
     var updated_passwords_list = std.ArrayListUnmanaged(PasswordItem){};
 
@@ -100,7 +106,6 @@ pub fn update_passwords_list(allocator: std.mem.Allocator, password_item: Passwo
 
         if (password_file) |pf| {
             defer pf.close();
-
             const pf_data = try pf.readToEndAlloc(allocator, 16 * 1024 * 1024);
 
             if (std.mem.trim(u8, pf_data, " \t\n\r").len != 0) {
@@ -120,4 +125,48 @@ pub fn update_passwords_list(allocator: std.mem.Allocator, password_item: Passwo
 
     try std.json.Stringify.value(updated_passwords_list.items, .{ .whitespace = .indent_4 }, &file_writer.interface);
     try file_writer.interface.flush();
+}
+
+pub fn getPassword(allocator: std.mem.Allocator) !void {
+    const file_path = "./passwords.json";
+
+    const pf = std.fs.cwd().openFile(file_path, .{ .mode = .read_only }) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("You have no passwords saved :(\n", .{});
+            std.debug.print("Please add at least one with option 1\n", .{});
+            return;
+        },
+        else => return err,
+    };
+
+    defer pf.close();
+    const pf_data = try pf.readToEndAlloc(allocator, 16 * 1024 * 1024);
+
+    if (std.mem.trim(u8, pf_data, " \t\n\r").len == 0) {
+        std.debug.print("You have no passwords saved :(\n", .{});
+        std.debug.print("Please add at least one with option 1\n", .{});
+        return;
+    }
+
+    const passwords_list = try std.json.parseFromSlice([]const PasswordItem, allocator, pf_data, .{});
+
+    if (passwords_list.value.len == 0) {
+        std.debug.print("You have no passwords saved :(\n", .{});
+        std.debug.print("Please add at least one with option 1\n", .{});
+        return;
+    }
+
+    std.debug.print("\n------------------------------\n", .{});
+
+    for (passwords_list.value) |value| {
+        std.debug.print("Service name: {s}\n", .{value.service_name});
+        std.debug.print("User ID: {s}\n", .{value.user_id});
+        std.debug.print("\n\n---------------------\n\n", .{});
+    }
+
+    std.debug.print("Please select the item you want to get: ", .{});
+    const item_index = try getInput(allocator);
+    const numeric_index = try std.fmt.parseInt(usize, item_index, 10);
+
+    std.debug.print("Your password is\n{s}\n\n", .{passwords_list.value[numeric_index].password});
 }
