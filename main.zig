@@ -2,6 +2,8 @@ const std = @import("std");
 
 const PasswordItem = struct { service_name: []const u8, user_id: []const u8, password: []const u8 };
 
+const file_path = "./passwords.json";
+
 // TODO: ARENA PATTERN
 // TODO: USE trim() for retro compatibility
 // TODO: Encrypt json
@@ -36,7 +38,7 @@ pub fn main() !void {
             const password_item = PasswordItem{
                 .service_name = service_name,
                 .user_id = user_id,
-                .password = try setRandomPassword(allocator, 12),
+                .password = try setRandomPassword(allocator),
             };
 
             try updatePasswordList(allocator, password_item);
@@ -71,9 +73,24 @@ pub fn getInput(allocator: std.mem.Allocator) ![]u8 {
     }
 }
 
-pub fn setRandomPassword(allocator: std.mem.Allocator, word_number: u8) ![]const u8 {
+pub fn setRandomPassword(allocator: std.mem.Allocator) ![]const u8 {
     var btc_words_pool = try std.fs.cwd().openFile("./english.txt", .{ .mode = .read_only });
     defer btc_words_pool.close();
+    var entropy: [16]u8 = undefined;
+    std.crypto.random.bytes(&entropy);
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(&entropy);
+    var hash: [32]u8 = undefined;
+    hasher.final(&hash);
+
+    const first_byte = hash[0];
+    const checksum = first_byte >> 4;
+
+    var final_bits: [17]u8 = [_]u8{0} ** 17;
+    @memcpy(final_bits[0..16], &entropy);
+    final_bits[16] = checksum << 4;
+    // from here
 
     const words = try btc_words_pool.readToEndAlloc(allocator, 1024 * 1024);
     var words_list = std.ArrayListUnmanaged([]const u8){};
@@ -85,7 +102,8 @@ pub fn setRandomPassword(allocator: std.mem.Allocator, word_number: u8) ![]const
 
     var password_builder = std.ArrayListUnmanaged([]const u8){};
 
-    for (0..word_number) |_| {
+    // to complete the loop generation here based on the 132 byte number
+    for (0..12) |_| {
         const random_word = words_list.items[std.crypto.random.int(u32) % words_list.items.len];
         try password_builder.append(allocator, random_word);
     }
@@ -95,7 +113,6 @@ pub fn setRandomPassword(allocator: std.mem.Allocator, word_number: u8) ![]const
 }
 
 pub fn updatePasswordList(allocator: std.mem.Allocator, password_item: PasswordItem) !void {
-    const file_path = "./passwords.json";
     var updated_passwords_list = std.ArrayListUnmanaged(PasswordItem){};
 
     {
@@ -128,8 +145,6 @@ pub fn updatePasswordList(allocator: std.mem.Allocator, password_item: PasswordI
 }
 
 pub fn getPassword(allocator: std.mem.Allocator) !void {
-    const file_path = "./passwords.json";
-
     const pf = std.fs.cwd().openFile(file_path, .{ .mode = .read_only }) catch |err| switch (err) {
         error.FileNotFound => {
             std.debug.print("You have no passwords saved :(\n", .{});
