@@ -194,4 +194,5 @@ comptime {
     _ = @import("bip39.zig");
     _ = @import("storage.zig");
     _ = @import("vault_service.zig");
+    _ = @import("schema_v2.zig");
 }
