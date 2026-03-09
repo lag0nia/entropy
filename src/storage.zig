@@ -195,3 +195,205 @@ fn validateWrapperMetadata(wrapper: model.EncryptedVault) !void {
     if (wrapper.cipher.nonce.len == 0) return StorageError.InvalidFormat;
     if (wrapper.cipher.ciphertext.len == 0) return StorageError.InvalidFormat;
 }
+
+fn makeSampleVault(allocator: std.mem.Allocator) !model.Vault {
+    const now = "2026-03-09T12:00:00";
+
+    var items = try allocator.alloc(model.Item, 1);
+    errdefer allocator.free(items);
+    items[0] = .{
+        .id = try allocator.dupe(u8, "item-1"),
+        .name = try allocator.dupe(u8, "github"),
+        .mail = try allocator.dupe(u8, "dev@example.com"),
+        .password = try allocator.dupe(u8, "super-secret"),
+        .notes = try allocator.dupe(u8, "personal account"),
+        .category_id = try allocator.dupe(u8, "cat-1"),
+        .created_at = try allocator.dupe(u8, now),
+        .updated_at = try allocator.dupe(u8, now),
+    };
+    errdefer model.freeItem(allocator, &items[0]);
+
+    var categories = try allocator.alloc(model.Category, 1);
+    errdefer allocator.free(categories);
+    categories[0] = .{
+        .id = try allocator.dupe(u8, "cat-1"),
+        .name = try allocator.dupe(u8, "work"),
+    };
+    errdefer model.freeCategory(allocator, &categories[0]);
+
+    return .{
+        .version = 1,
+        .items = items,
+        .categories = categories,
+    };
+}
+
+fn makeTempVaultPath(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8 {
+    const abs = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(abs);
+    return try std.fmt.allocPrint(allocator, "{s}/vault.enc", .{abs});
+}
+
+fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+    defer file.close();
+    return try file.readToEndAlloc(allocator, 8 * 1024 * 1024);
+}
+
+fn writeFile(path: []const u8, data: []const u8) !void {
+    const file = try std.fs.cwd().createFile(path, .{});
+    defer file.close();
+    try file.writeAll(data);
+}
+
+test "saveVault and loadVault roundtrip" {
+    try crypto.init();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const vault_path = try makeTempVaultPath(allocator, &tmp);
+    defer allocator.free(vault_path);
+
+    var vault = try makeSampleVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    const password = "test-master-password";
+    const salt = crypto.generateSalt();
+    const key = try crypto.deriveKey(password, &salt);
+
+    try saveVault(allocator, vault, &key, &salt, vault_path);
+    const loaded = try loadVault(allocator, password, vault_path);
+    defer {
+        model.freeVault(allocator, @constCast(&loaded.vault));
+        crypto.zeroize(@constCast(&loaded.key));
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), loaded.vault.items.len);
+    try std.testing.expectEqual(@as(usize, 1), loaded.vault.categories.len);
+    try std.testing.expectEqualStrings("github", loaded.vault.items[0].name.?);
+    try std.testing.expectEqualStrings("dev@example.com", loaded.vault.items[0].mail.?);
+    try std.testing.expectEqualStrings("super-secret", loaded.vault.items[0].password);
+    try std.testing.expectEqualStrings("work", loaded.vault.categories[0].name);
+}
+
+test "loadVault with wrong password fails" {
+    try crypto.init();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const vault_path = try makeTempVaultPath(allocator, &tmp);
+    defer allocator.free(vault_path);
+
+    var vault = try makeSampleVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    const salt = crypto.generateSalt();
+    const key = try crypto.deriveKey("correct-password", &salt);
+    try saveVault(allocator, vault, &key, &salt, vault_path);
+
+    const result = loadVault(allocator, "wrong-password", vault_path);
+    try std.testing.expectError(StorageError.CorruptedVault, result);
+}
+
+test "loadVault rejects unsupported wrapper version" {
+    try crypto.init();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const vault_path = try makeTempVaultPath(allocator, &tmp);
+    defer allocator.free(vault_path);
+
+    var vault = try makeSampleVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    const password = "version-check";
+    const salt = crypto.generateSalt();
+    const key = try crypto.deriveKey(password, &salt);
+    try saveVault(allocator, vault, &key, &salt, vault_path);
+
+    const raw = try readFileAlloc(allocator, vault_path);
+    defer allocator.free(raw);
+    var parsed = try std.json.parseFromSlice(model.EncryptedVault, allocator, raw, .{});
+    defer parsed.deinit();
+
+    var wrapper = parsed.value;
+    wrapper.version = 2;
+    const mutated = try jsonStringifyAlloc(allocator, wrapper);
+    defer allocator.free(mutated);
+    try writeFile(vault_path, mutated);
+
+    const result = loadVault(allocator, password, vault_path);
+    try std.testing.expectError(StorageError.InvalidFormat, result);
+}
+
+test "loadVault rejects unknown KDF algorithm" {
+    try crypto.init();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const vault_path = try makeTempVaultPath(allocator, &tmp);
+    defer allocator.free(vault_path);
+
+    var vault = try makeSampleVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    const password = "kdf-check";
+    const salt = crypto.generateSalt();
+    const key = try crypto.deriveKey(password, &salt);
+    try saveVault(allocator, vault, &key, &salt, vault_path);
+
+    const raw = try readFileAlloc(allocator, vault_path);
+    defer allocator.free(raw);
+    var parsed = try std.json.parseFromSlice(model.EncryptedVault, allocator, raw, .{});
+    defer parsed.deinit();
+
+    var wrapper = parsed.value;
+    wrapper.kdf.alg = "bad-kdf";
+    const mutated = try jsonStringifyAlloc(allocator, wrapper);
+    defer allocator.free(mutated);
+    try writeFile(vault_path, mutated);
+
+    const result = loadVault(allocator, password, vault_path);
+    try std.testing.expectError(StorageError.InvalidFormat, result);
+}
+
+test "loadVault rejects invalid KDF params from metadata" {
+    try crypto.init();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const vault_path = try makeTempVaultPath(allocator, &tmp);
+    defer allocator.free(vault_path);
+
+    var vault = try makeSampleVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    const password = "kdf-params";
+    const salt = crypto.generateSalt();
+    const key = try crypto.deriveKey(password, &salt);
+    try saveVault(allocator, vault, &key, &salt, vault_path);
+
+    const raw = try readFileAlloc(allocator, vault_path);
+    defer allocator.free(raw);
+    var parsed = try std.json.parseFromSlice(model.EncryptedVault, allocator, raw, .{});
+    defer parsed.deinit();
+
+    var wrapper = parsed.value;
+    wrapper.kdf.mem_limit = 1;
+    const mutated = try jsonStringifyAlloc(allocator, wrapper);
+    defer allocator.free(mutated);
+    try writeFile(vault_path, mutated);
+
+    const result = loadVault(allocator, password, vault_path);
+    try std.testing.expectError(StorageError.InvalidFormat, result);
+}

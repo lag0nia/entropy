@@ -192,4 +192,6 @@ comptime {
     _ = @import("model.zig");
     _ = @import("crypto.zig");
     _ = @import("bip39.zig");
+    _ = @import("storage.zig");
+    _ = @import("vault_service.zig");
 }

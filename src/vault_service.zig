@@ -241,3 +241,118 @@ fn categoryNameExists(
     return false;
 }
 
+fn makeEmptyVault(allocator: std.mem.Allocator) !model.Vault {
+    return .{
+        .version = 1,
+        .items = try allocator.alloc(model.Item, 0),
+        .categories = try allocator.alloc(model.Category, 0),
+    };
+}
+
+test "category names must be unique" {
+    const allocator = std.testing.allocator;
+    var vault = try makeEmptyVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    try createCategory(allocator, &vault, "work");
+    try std.testing.expectError(
+        ServiceError.CategoryNameAlreadyExists,
+        createCategory(allocator, &vault, "work"),
+    );
+}
+
+test "createItem validates required fields and wordlist availability" {
+    const allocator = std.testing.allocator;
+    var vault = try makeEmptyVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    try std.testing.expectError(
+        ServiceError.NameOrMailRequired,
+        createItem(allocator, &vault, .{
+            .name = "",
+            .mail = "",
+            .password = "pw",
+            .notes = "",
+            .category_name = "",
+        }, null),
+    );
+
+    try std.testing.expectError(
+        ServiceError.NoWordlistLoaded,
+        createItem(allocator, &vault, .{
+            .name = "github",
+            .mail = "",
+            .password = "",
+            .notes = "",
+            .category_name = "",
+        }, null),
+    );
+}
+
+test "createItem fails when category does not exist" {
+    const allocator = std.testing.allocator;
+    var vault = try makeEmptyVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    try std.testing.expectError(
+        ServiceError.CategoryNotFound,
+        createItem(allocator, &vault, .{
+            .name = "mail",
+            .mail = "a@b.com",
+            .password = "pw",
+            .notes = "",
+            .category_name = "unknown",
+        }, null),
+    );
+}
+
+test "item and category CRUD flow keeps state consistent" {
+    const allocator = std.testing.allocator;
+    var vault = try makeEmptyVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    try createCategory(allocator, &vault, "work");
+    try createItem(allocator, &vault, .{
+        .name = "github",
+        .mail = "dev@example.com",
+        .password = "initial",
+        .notes = "n1",
+        .category_name = "work",
+    }, null);
+
+    try std.testing.expectEqual(@as(usize, 1), vault.items.len);
+    try std.testing.expectEqual(@as(usize, 1), vault.categories.len);
+    try std.testing.expect(vault.items[0].category_id != null);
+
+    try updateItem(allocator, &vault, 0, .{
+        .name = "github-updated",
+        .mail = "dev@example.com",
+        .password = "newpw",
+        .notes = "n2",
+        .category_name = "",
+    });
+    try std.testing.expectEqualStrings("github-updated", vault.items[0].name.?);
+    try std.testing.expectEqualStrings("newpw", vault.items[0].password);
+    try std.testing.expect(vault.items[0].category_id == null);
+
+    try deleteCategory(allocator, &vault, 0);
+    try std.testing.expectEqual(@as(usize, 0), vault.categories.len);
+    try std.testing.expect(vault.items[0].category_id == null);
+
+    try deleteItem(allocator, &vault, 0);
+    try std.testing.expectEqual(@as(usize, 0), vault.items.len);
+}
+
+test "updateCategory prevents duplicate names" {
+    const allocator = std.testing.allocator;
+    var vault = try makeEmptyVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    try createCategory(allocator, &vault, "work");
+    try createCategory(allocator, &vault, "personal");
+
+    try std.testing.expectError(
+        ServiceError.CategoryNameAlreadyExists,
+        updateCategory(allocator, &vault, 1, "work"),
+    );
+}
