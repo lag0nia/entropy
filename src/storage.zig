@@ -127,23 +127,23 @@ pub fn loadVault(
 
     // Decode base64 fields
     var salt: [crypto.SALT_LEN]u8 = undefined;
-    const salt_len = base64_decoder.decode(&salt, wrapper.kdf.salt) catch
+    const salt_len = base64_decoder.calcSizeForSlice(wrapper.kdf.salt) catch
         return StorageError.CorruptedVault;
     if (salt_len != crypto.SALT_LEN) return StorageError.InvalidFormat;
+    base64_decoder.decode(&salt, wrapper.kdf.salt) catch return StorageError.CorruptedVault;
 
     var nonce: [crypto.NONCE_LEN]u8 = undefined;
-    const nonce_len = base64_decoder.decode(&nonce, wrapper.cipher.nonce) catch
+    const nonce_len = base64_decoder.calcSizeForSlice(wrapper.cipher.nonce) catch
         return StorageError.CorruptedVault;
     if (nonce_len != crypto.NONCE_LEN) return StorageError.InvalidFormat;
+    base64_decoder.decode(&nonce, wrapper.cipher.nonce) catch return StorageError.CorruptedVault;
 
     const ct_len = base64_decoder.calcSizeForSlice(wrapper.cipher.ciphertext) catch
         return StorageError.CorruptedVault;
     if (ct_len < crypto.TAG_LEN) return StorageError.InvalidFormat;
     const ciphertext = allocator.alloc(u8, ct_len) catch return StorageError.CorruptedVault;
     defer allocator.free(ciphertext);
-    const decoded_ct_len = base64_decoder.decode(ciphertext, wrapper.cipher.ciphertext) catch
-        return StorageError.CorruptedVault;
-    if (decoded_ct_len != ct_len) return StorageError.InvalidFormat;
+    base64_decoder.decode(ciphertext, wrapper.cipher.ciphertext) catch return StorageError.CorruptedVault;
 
     // Derive key
     const mem_limit = std.math.cast(usize, wrapper.kdf.mem_limit) orelse

@@ -156,6 +156,10 @@ pub fn readPassword(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
 
     // Disable echo
     const stdin_fd = std.fs.File.stdin().handle;
+    if (!std.posix.isatty(stdin_fd)) {
+        return (try readLine(allocator)) orelse error.EndOfStream;
+    }
+
     var termios = try std.posix.tcgetattr(stdin_fd);
     const old_lflag = termios.lflag;
     termios.lflag.ECHO = false;
