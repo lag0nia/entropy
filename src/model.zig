@@ -26,6 +26,11 @@ pub const Vault = struct {
     categories: []Category,
 };
 
+/// Ownership contract:
+/// - Every string field inside Item/Category is owned by the Vault.
+/// - Vault owns items/categories slices and every element's string fields.
+/// - Call freeVault() exactly once to release all owned memory.
+
 /// Encrypted file wrapper (what's actually written to disk)
 pub const EncryptedVault = struct {
     version: u32 = 1,
@@ -94,6 +99,122 @@ pub fn nowTimestamp(buf: *[20]u8) []const u8 {
     return buf[0..19];
 }
 
+pub fn cloneItem(allocator: std.mem.Allocator, item: Item) !Item {
+    return .{
+        .id = try allocator.dupe(u8, item.id),
+        .name = try dupOptional(allocator, item.name),
+        .mail = try dupOptional(allocator, item.mail),
+        .password = try allocator.dupe(u8, item.password),
+        .notes = try dupOptional(allocator, item.notes),
+        .category_id = try dupOptional(allocator, item.category_id),
+        .created_at = try allocator.dupe(u8, item.created_at),
+        .updated_at = try allocator.dupe(u8, item.updated_at),
+    };
+}
+
+pub fn cloneCategory(allocator: std.mem.Allocator, category: Category) !Category {
+    return .{
+        .id = try allocator.dupe(u8, category.id),
+        .name = try allocator.dupe(u8, category.name),
+        .color = try dupOptional(allocator, category.color),
+    };
+}
+
+pub fn cloneVault(allocator: std.mem.Allocator, vault: Vault) !Vault {
+    var items = try allocator.alloc(Item, vault.items.len);
+    var item_count: usize = 0;
+    errdefer {
+        for (0..item_count) |i| {
+            freeItem(allocator, &items[i]);
+        }
+        allocator.free(items);
+    }
+    for (vault.items, 0..) |item, i| {
+        items[i] = try cloneItem(allocator, item);
+        item_count += 1;
+    }
+
+    var categories = try allocator.alloc(Category, vault.categories.len);
+    var category_count: usize = 0;
+    errdefer {
+        for (0..category_count) |i| {
+            freeCategory(allocator, &categories[i]);
+        }
+        allocator.free(categories);
+        for (items) |*item| {
+            freeItem(allocator, item);
+        }
+        allocator.free(items);
+    }
+    for (vault.categories, 0..) |category, i| {
+        categories[i] = try cloneCategory(allocator, category);
+        category_count += 1;
+    }
+
+    return .{
+        .version = vault.version,
+        .items = items,
+        .categories = categories,
+    };
+}
+
+pub fn freeItem(allocator: std.mem.Allocator, item: *Item) void {
+    allocator.free(item.id);
+    if (item.name) |name| allocator.free(name);
+    if (item.mail) |mail| allocator.free(mail);
+    allocator.free(item.password);
+    if (item.notes) |notes| allocator.free(notes);
+    if (item.category_id) |category_id| allocator.free(category_id);
+    allocator.free(item.created_at);
+    allocator.free(item.updated_at);
+
+    item.* = .{
+        .id = "",
+        .name = null,
+        .mail = null,
+        .password = "",
+        .notes = null,
+        .category_id = null,
+        .created_at = "",
+        .updated_at = "",
+    };
+}
+
+pub fn freeCategory(allocator: std.mem.Allocator, category: *Category) void {
+    allocator.free(category.id);
+    allocator.free(category.name);
+    if (category.color) |color| allocator.free(color);
+
+    category.* = .{
+        .id = "",
+        .name = "",
+        .color = null,
+    };
+}
+
+pub fn freeVault(allocator: std.mem.Allocator, vault: *Vault) void {
+    for (vault.items) |*item| {
+        freeItem(allocator, item);
+    }
+    allocator.free(vault.items);
+
+    for (vault.categories) |*category| {
+        freeCategory(allocator, category);
+    }
+    allocator.free(vault.categories);
+
+    vault.* = .{
+        .version = vault.version,
+        .items = &.{},
+        .categories = &.{},
+    };
+}
+
+fn dupOptional(allocator: std.mem.Allocator, value: ?[]const u8) !?[]const u8 {
+    if (value) |v| return try allocator.dupe(u8, v);
+    return null;
+}
+
 test "generateUuid produces valid format" {
     const uuid = generateUuid();
     // Check dashes at correct positions
@@ -110,4 +231,44 @@ test "nowTimestamp produces valid ISO format" {
     try std.testing.expectEqual(ts.len, 19);
     try std.testing.expectEqual(ts[4], '-');
     try std.testing.expectEqual(ts[10], 'T');
+}
+
+test "cloneVault performs deep copy and freeVault releases memory" {
+    const allocator = std.testing.allocator;
+
+    const item = Item{
+        .id = try allocator.dupe(u8, "item-1"),
+        .name = try allocator.dupe(u8, "example"),
+        .mail = try allocator.dupe(u8, "a@b.com"),
+        .password = try allocator.dupe(u8, "secret"),
+        .notes = try allocator.dupe(u8, "note"),
+        .category_id = try allocator.dupe(u8, "cat-1"),
+        .created_at = try allocator.dupe(u8, "2026-03-09T12:00:00"),
+        .updated_at = try allocator.dupe(u8, "2026-03-09T12:00:00"),
+    };
+    const category = Category{
+        .id = try allocator.dupe(u8, "cat-1"),
+        .name = try allocator.dupe(u8, "personal"),
+        .color = try allocator.dupe(u8, "blue"),
+    };
+
+    var items = try allocator.alloc(Item, 1);
+    items[0] = item;
+    var categories = try allocator.alloc(Category, 1);
+    categories[0] = category;
+
+    var original = Vault{
+        .version = 1,
+        .items = items,
+        .categories = categories,
+    };
+
+    var cloned = try cloneVault(allocator, original);
+
+    try std.testing.expect(cloned.items[0].id.ptr != original.items[0].id.ptr);
+    try std.testing.expect(cloned.items[0].password.ptr != original.items[0].password.ptr);
+    try std.testing.expect(cloned.categories[0].name.ptr != original.categories[0].name.ptr);
+
+    freeVault(allocator, &original);
+    freeVault(allocator, &cloned);
 }

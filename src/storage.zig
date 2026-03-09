@@ -169,9 +169,12 @@ pub fn loadVault(
     // Parse vault JSON
     const vault_parsed = std.json.parseFromSlice(model.Vault, allocator, plaintext, .{}) catch
         return StorageError.CorruptedVault;
+    defer vault_parsed.deinit();
+    const vault = model.cloneVault(allocator, vault_parsed.value) catch
+        return StorageError.CorruptedVault;
 
     return .{
-        .vault = vault_parsed.value,
+        .vault = vault,
         .key = key,
         .salt = salt,
     };

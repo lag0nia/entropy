@@ -182,3 +182,45 @@ pub fn repeatStr(allocator: std.mem.Allocator, str: []const u8, count: usize) ![
     }
     return result;
 }
+
+/// Try to copy text to system clipboard. Returns false when no clipboard backend is available.
+pub fn copyToClipboard(allocator: std.mem.Allocator, text: []const u8) !bool {
+    if (try copyWithCommand(allocator, &.{ "pbcopy" }, text)) return true;
+    if (try copyWithCommand(allocator, &.{ "wl-copy" }, text)) return true;
+    if (try copyWithCommand(allocator, &.{ "xclip", "-selection", "clipboard" }, text)) return true;
+    return false;
+}
+
+fn copyWithCommand(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    text: []const u8,
+) !bool {
+    var child = std.process.Child.init(argv, allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    child.spawn() catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    errdefer {
+        _ = child.kill() catch {};
+        _ = child.wait() catch {};
+    }
+
+    if (child.stdin) |*stdin| {
+        try stdin.writeAll(text);
+        stdin.close();
+        child.stdin = null;
+    } else {
+        return false;
+    }
+
+    const term = try child.wait();
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+}

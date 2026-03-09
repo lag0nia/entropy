@@ -150,6 +150,8 @@ pub fn main() !void {
             .vault_path = vault_path,
         };
     }
+    defer model.freeVault(allocator, &session.vault);
+    defer crypto.zeroize(&session.key);
 
     try w.print("{s}{s} Vault unlocked. Launching TUI...{s}\n\n", .{
         Color.green, utils.Icon.check, Color.reset,
@@ -163,9 +165,6 @@ pub fn main() !void {
     tui.run(allocator, &session) catch |err| {
         std.debug.print("TUI error: {}\n", .{err});
     };
-
-    // Zeroize sensitive data before exit
-    crypto.zeroize(&session.key);
 }
 
 fn printBanner(w: *std.Io.Writer) !void {

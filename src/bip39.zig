@@ -17,14 +17,22 @@ pub fn loadWordlist(allocator: std.mem.Allocator, path: []const u8) ![][]const u
     defer file.close();
 
     const data = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(data);
 
     var words: std.ArrayList([]const u8) = .{};
+    errdefer {
+        for (words.items) |word| {
+            allocator.free(word);
+        }
+        words.deinit(allocator);
+    }
 
     var it = std.mem.tokenizeScalar(u8, data, '\n');
     while (it.next()) |word| {
         const trimmed = std.mem.trim(u8, word, " \t\r");
         if (trimmed.len > 0) {
-            try words.append(allocator, trimmed);
+            const owned_word = try allocator.dupe(u8, trimmed);
+            try words.append(allocator, owned_word);
         }
     }
 
@@ -33,6 +41,13 @@ pub fn loadWordlist(allocator: std.mem.Allocator, path: []const u8) ![][]const u
     }
 
     return words.toOwnedSlice(allocator);
+}
+
+pub fn freeWordlist(allocator: std.mem.Allocator, wordlist: [][]const u8) void {
+    for (wordlist) |word| {
+        allocator.free(word);
+    }
+    allocator.free(wordlist);
 }
 
 /// Generate a 12-word BIP-39 mnemonic.

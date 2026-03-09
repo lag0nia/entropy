@@ -4,6 +4,7 @@ const model = @import("model.zig");
 const crypto = @import("crypto.zig");
 const storage = @import("storage.zig");
 const bip39 = @import("bip39.zig");
+const vault_service = @import("vault_service.zig");
 
 pub const Color = utils.Color;
 pub const Box = utils.Box;
@@ -505,6 +506,9 @@ fn drawHelp(w: *Writer, state: *const TuiState) !void {
     try w.print("  {s}Item list{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    Up/Down navigate, Enter detail, n new, e edit, d delete, c categories, q quit\n");
 
+    try w.print("\n  {s}Item detail{s}\n", .{ Color.cyan, Color.reset });
+    try w.writeAll("    p reveal password in message area, y copy password to clipboard\n");
+
     try w.print("\n  {s}Item/category forms{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    Tab next field, Enter save, Esc cancel\n");
     try w.writeAll("    Ctrl+G generate password (only item form)\n");
@@ -612,76 +616,45 @@ fn initCategoryForm(state: *TuiState) void {
 }
 
 fn saveItemForm(state: *TuiState) !void {
-    const name = state.form_fields[0].slice();
-    const mail = state.form_fields[1].slice();
-    const password = state.form_fields[2].slice();
-    const notes = state.form_fields[3].slice();
-    const cat_name = state.form_fields[4].slice();
-
-    // Validate: at least name or mail
-    if (name.len == 0 and mail.len == 0) {
-        state.setMessage("Name or mail is required", true);
-        return;
-    }
-
-    // Resolve category
-    var cat_id: ?[]const u8 = null;
-    if (cat_name.len > 0) {
-        for (state.session.vault.categories) |cat| {
-            if (std.mem.eql(u8, cat.name, cat_name)) {
-                cat_id = cat.id;
-                break;
-            }
-        }
-    }
-
-    var ts_buf: [20]u8 = undefined;
-    const now = model.nowTimestamp(&ts_buf);
+    const input = vault_service.ItemFormInput{
+        .name = state.form_fields[0].slice(),
+        .mail = state.form_fields[1].slice(),
+        .password = state.form_fields[2].slice(),
+        .notes = state.form_fields[3].slice(),
+        .category_name = state.form_fields[4].slice(),
+    };
 
     if (state.form_editing_index) |idx| {
-        // Update existing item
-        var item = &state.session.vault.items[idx];
-        item.name = if (name.len > 0) try state.allocator.dupe(u8, name) else null;
-        item.mail = if (mail.len > 0) try state.allocator.dupe(u8, mail) else null;
-        if (password.len > 0) {
-            item.password = try state.allocator.dupe(u8, password);
-        }
-        item.notes = if (notes.len > 0) try state.allocator.dupe(u8, notes) else null;
-        item.category_id = cat_id;
-        item.updated_at = try state.allocator.dupe(u8, now);
+        vault_service.updateItem(
+            state.allocator,
+            &state.session.vault,
+            idx,
+            input,
+        ) catch |err| {
+            switch (err) {
+                error.NameOrMailRequired => state.setMessage("Name or mail is required", true),
+                error.CategoryNotFound => state.setMessage("Category not found", true),
+                error.ItemIndexOutOfRange => state.setMessage("Invalid item selection", true),
+                else => return err,
+            }
+            return;
+        };
         state.setMessage("Item updated", false);
     } else {
-        // Create new item
-        const uuid = model.generateUuid();
-        const pw = if (password.len > 0)
-            try state.allocator.dupe(u8, password)
-        else blk: {
-            // Auto-generate password
-            if (state.wordlist) |wl| {
-                break :blk try bip39.generateMnemonic(state.allocator, wl, "-");
-            } else {
-                state.setMessage("No wordlist loaded for generation", true);
-                return;
+        vault_service.createItem(
+            state.allocator,
+            &state.session.vault,
+            input,
+            state.wordlist,
+        ) catch |err| {
+            switch (err) {
+                error.NameOrMailRequired => state.setMessage("Name or mail is required", true),
+                error.CategoryNotFound => state.setMessage("Category not found", true),
+                error.NoWordlistLoaded => state.setMessage("No wordlist loaded for generation", true),
+                else => return err,
             }
+            return;
         };
-
-        const new_item = model.Item{
-            .id = try state.allocator.dupe(u8, &uuid),
-            .name = if (name.len > 0) try state.allocator.dupe(u8, name) else null,
-            .mail = if (mail.len > 0) try state.allocator.dupe(u8, mail) else null,
-            .password = pw,
-            .notes = if (notes.len > 0) try state.allocator.dupe(u8, notes) else null,
-            .category_id = cat_id,
-            .created_at = try state.allocator.dupe(u8, now),
-            .updated_at = try state.allocator.dupe(u8, now),
-        };
-
-        // Append to items list
-        var items_list: std.ArrayList(model.Item) = .{};
-        try items_list.appendSlice(state.allocator, state.session.vault.items);
-        try items_list.append(state.allocator, new_item);
-        state.session.vault.items = try items_list.toOwnedSlice(state.allocator);
-
         state.setMessage("Item created", false);
     }
 
@@ -693,31 +666,35 @@ fn saveItemForm(state: *TuiState) !void {
 fn saveCategoryForm(state: *TuiState) !void {
     const name = state.form_fields[0].slice();
 
-    if (name.len == 0) {
-        state.setMessage("Category name is required", true);
-        return;
-    }
-
-    var ts_buf: [20]u8 = undefined;
-    _ = model.nowTimestamp(&ts_buf);
-
     if (state.form_editing_index) |idx| {
-        // Update existing
-        state.session.vault.categories[idx].name = try state.allocator.dupe(u8, name);
+        vault_service.updateCategory(
+            state.allocator,
+            &state.session.vault,
+            idx,
+            name,
+        ) catch |err| {
+            switch (err) {
+                error.CategoryNameRequired => state.setMessage("Category name is required", true),
+                error.CategoryNameAlreadyExists => state.setMessage("Category already exists", true),
+                error.CategoryIndexOutOfRange => state.setMessage("Invalid category selection", true),
+                else => return err,
+            }
+            return;
+        };
         state.setMessage("Category updated", false);
     } else {
-        // Create new
-        const uuid = model.generateUuid();
-        const new_cat = model.Category{
-            .id = try state.allocator.dupe(u8, &uuid),
-            .name = try state.allocator.dupe(u8, name),
+        vault_service.createCategory(
+            state.allocator,
+            &state.session.vault,
+            name,
+        ) catch |err| {
+            switch (err) {
+                error.CategoryNameRequired => state.setMessage("Category name is required", true),
+                error.CategoryNameAlreadyExists => state.setMessage("Category already exists", true),
+                else => return err,
+            }
+            return;
         };
-
-        var cats: std.ArrayList(model.Category) = .{};
-        try cats.appendSlice(state.allocator, state.session.vault.categories);
-        try cats.append(state.allocator, new_cat);
-        state.session.vault.categories = try cats.toOwnedSlice(state.allocator);
-
         state.setMessage("Category created", false);
     }
 
@@ -728,17 +705,17 @@ fn saveCategoryForm(state: *TuiState) !void {
 }
 
 fn deleteSelectedItem(state: *TuiState) !void {
-    const items = state.session.vault.items;
-    if (state.selected >= items.len) return;
-
-    // Rebuild items without the selected one
-    var new_items: std.ArrayList(model.Item) = .{};
-    for (items, 0..) |item, i| {
-        if (i != state.selected) {
-            try new_items.append(state.allocator, item);
+    vault_service.deleteItem(
+        state.allocator,
+        &state.session.vault,
+        state.selected,
+    ) catch |err| {
+        switch (err) {
+            error.ItemIndexOutOfRange => state.setMessage("Invalid item selection", true),
+            else => return err,
         }
-    }
-    state.session.vault.items = try new_items.toOwnedSlice(state.allocator);
+        return;
+    };
 
     if (state.selected > 0) state.selected -= 1;
     state.session.dirty = true;
@@ -748,27 +725,17 @@ fn deleteSelectedItem(state: *TuiState) !void {
 }
 
 fn deleteSelectedCategory(state: *TuiState) !void {
-    const categories = state.session.vault.categories;
-    if (state.selected >= categories.len) return;
-    const cat_id = categories[state.selected].id;
-
-    // Remove category_id from items that use it
-    for (state.session.vault.items) |*item| {
-        if (item.category_id) |cid| {
-            if (std.mem.eql(u8, cid, cat_id)) {
-                item.category_id = null;
-            }
+    vault_service.deleteCategory(
+        state.allocator,
+        &state.session.vault,
+        state.selected,
+    ) catch |err| {
+        switch (err) {
+            error.CategoryIndexOutOfRange => state.setMessage("Invalid category selection", true),
+            else => return err,
         }
-    }
-
-    // Rebuild categories without the selected one
-    var new_cats: std.ArrayList(model.Category) = .{};
-    for (categories, 0..) |cat, i| {
-        if (i != state.selected) {
-            try new_cats.append(state.allocator, cat);
-        }
-    }
-    state.session.vault.categories = try new_cats.toOwnedSlice(state.allocator);
+        return;
+    };
 
     if (state.selected > 0) state.selected -= 1;
     state.session.dirty = true;
@@ -906,6 +873,15 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
                 const pw = state.session.vault.items[state.selected].password;
                 state.setMessage(pw, false);
             },
+            'y' => {
+                const pw = state.session.vault.items[state.selected].password;
+                const copied = utils.copyToClipboard(state.allocator, pw) catch false;
+                if (copied) {
+                    state.setMessage("Password copied to clipboard", false);
+                } else {
+                    state.setMessage("Clipboard unavailable (pbcopy/wl-copy/xclip)", true);
+                }
+            },
             '?' => {
                 state.prev_screen = .item_detail;
                 state.screen = .help;
@@ -1029,6 +1005,11 @@ pub fn run(allocator: std.mem.Allocator, session: *VaultSession) !void {
 
     // Load wordlist
     state.wordlist = bip39.loadWordlist(allocator, storage.getWordlistPath()) catch null;
+    defer {
+        if (state.wordlist) |wl| {
+            bip39.freeWordlist(allocator, wl);
+        }
+    }
 
     // Enter raw mode + alternate screen
     const raw = RawMode.enable() catch {
