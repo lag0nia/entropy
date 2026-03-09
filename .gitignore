@@ -1,8 +1,9 @@
-passwords.json
-
 # Zig build artifacts
 main
 main.o
 zig-out/
 .zig-cache/
 .zigversion
+
+# Build system
+build.zig.zon
