@@ -283,21 +283,25 @@ fn drawItemList(w: *Writer, state: *TuiState) !void {
         const is_selected = (i == state.selected);
 
         if (is_selected) {
-            try w.print("  {s}{s}{s} ", .{ Color.bg_bright_blue, Color.bright_white, Color.bold });
+            try w.print("  {s}{s}{s}{s} ", .{ Color.cyan, Color.bold, Icon.arrow_right, Color.reset });
         } else {
-            try w.writeAll("   ");
+            try w.writeAll("    ");
         }
 
         // Name
         const name = item.name orelse "(unnamed)";
-        try w.print("{s}", .{name});
+        if (is_selected) {
+            try w.print("{s}{s}{s}{s}", .{ Color.bold, Color.bright_white, name, Color.reset });
+        } else {
+            try w.print("{s}", .{name});
+        }
 
         // Category badge
         if (item.category_id) |cat_id| {
             for (categories) |cat| {
                 if (std.mem.eql(u8, cat.id, cat_id)) {
                     if (is_selected) {
-                        try w.print("  [{s}]", .{cat.name});
+                        try w.print("  {s}[{s}]{s}", .{ Color.dim, cat.name, Color.reset });
                     } else {
                         try w.print("  {s}[{s}]{s}", .{ Color.yellow, cat.name, Color.reset });
                     }
@@ -308,15 +312,7 @@ fn drawItemList(w: *Writer, state: *TuiState) !void {
 
         // Mail (dimmed)
         if (item.mail) |mail| {
-            if (is_selected) {
-                try w.print("  {s}", .{mail});
-            } else {
-                try w.print("  {s}{s}{s}", .{ Color.dim, mail, Color.reset });
-            }
-        }
-
-        if (is_selected) {
-            try w.print("{s}", .{Color.reset});
+            try w.print("  {s}{s}{s}", .{ Color.dim, mail, Color.reset });
         }
         try w.writeAll("\n");
     }
@@ -405,12 +401,16 @@ fn drawCategoryList(w: *Writer, state: *TuiState) !void {
     for (categories, 0..) |cat, i| {
         const is_selected = (i == state.selected);
         if (is_selected) {
-            try w.print("  {s}{s}{s} ", .{ Color.bg_bright_blue, Color.bright_white, Color.bold });
+            try w.print("  {s}{s}{s}{s} ", .{ Color.cyan, Color.bold, Icon.arrow_right, Color.reset });
         } else {
-            try w.writeAll("   ");
+            try w.writeAll("    ");
         }
 
-        try w.print("{s}", .{cat.name});
+        if (is_selected) {
+            try w.print("{s}{s}{s}{s}", .{ Color.bold, Color.bright_white, cat.name, Color.reset });
+        } else {
+            try w.print("{s}", .{cat.name});
+        }
 
         // Count items in this category
         var count: usize = 0;
@@ -421,8 +421,7 @@ fn drawCategoryList(w: *Writer, state: *TuiState) !void {
         }
 
         if (is_selected) {
-            try w.print("  ({d} items)", .{count});
-            try w.print("{s}", .{Color.reset});
+            try w.print("  {s}({d} items){s}", .{ Color.dim, count, Color.reset });
         } else {
             try w.print("  {s}({d} items){s}", .{ Color.dim, count, Color.reset });
         }
