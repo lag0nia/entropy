@@ -4,6 +4,7 @@ const crypto = @import("crypto.zig");
 const storage = @import("storage.zig");
 const utils = @import("utils.zig");
 const tui = @import("tui.zig");
+const import_bitwarden = @import("import_bitwarden.zig");
 
 const Color = utils.Color;
 const Box = utils.Box;
@@ -12,6 +13,40 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    const args_alloc = std.process.argsAlloc(allocator) catch {
+        std.debug.print("Error: failed to read command-line arguments.\n", .{});
+        return;
+    };
+    defer std.process.argsFree(allocator, args_alloc);
+
+    const args = allocator.alloc([]const u8, args_alloc.len) catch {
+        std.debug.print("Error: out of memory parsing command-line arguments.\n", .{});
+        return;
+    };
+    defer allocator.free(args);
+    for (args_alloc, 0..) |arg, i| {
+        args[i] = arg;
+    }
+
+    var import_cmd: ?import_bitwarden.CliOptions = null;
+    if (import_bitwarden.parseImportCommand(args)) |maybe_import| {
+        if (maybe_import) |cmd| {
+            const owned_file_path = allocator.dupe(u8, cmd.file_path) catch {
+                std.debug.print("Error: out of memory for import file path.\n", .{});
+                return;
+            };
+            import_cmd = .{
+                .file_path = owned_file_path,
+                .options = cmd.options,
+            };
+        }
+    } else |err| {
+        std.debug.print("Import argument error: {}\n", .{err});
+        printImportUsage();
+        return;
+    }
+    defer if (import_cmd) |cmd| allocator.free(cmd.file_path);
 
     // Initialize libsodium
     crypto.init() catch {
@@ -153,6 +188,37 @@ pub fn main() !void {
     defer model.freeVault(allocator, &session.vault);
     defer crypto.zeroize(&session.key);
 
+    if (import_cmd) |cmd| {
+        try w.print("{s}{s} Running Bitwarden import...{s}\n", .{
+            Color.yellow, utils.Icon.shield, Color.reset,
+        });
+        try w.flush();
+
+        var target: import_bitwarden.ImportTarget = .{
+            .vault = &session.vault,
+            .key = &session.key,
+            .salt = &session.salt,
+            .vault_path = session.vault_path,
+        };
+
+        const summary = import_bitwarden.importFromBitwardenJsonFile(
+            allocator,
+            &target,
+            cmd.file_path,
+            cmd.options,
+        ) catch |err| {
+            try w.print("{s}{s} Import failed: {}{s}\n", .{
+                Color.red, utils.Icon.cross_mark, err, Color.reset,
+            });
+            try w.flush();
+            return;
+        };
+
+        try printImportSummary(w, summary, cmd.options);
+        try w.flush();
+        return;
+    }
+
     try w.print("{s}{s} Vault unlocked. Launching TUI...{s}\n\n", .{
         Color.green, utils.Icon.check, Color.reset,
     });
@@ -187,6 +253,65 @@ fn printBanner(w: *std.Io.Writer) !void {
     try w.print("{s}\n", .{Color.reset});
 }
 
+fn printImportUsage() void {
+    std.debug.print(
+        \\Usage:
+        \\  enthropy import bitwarden --file <path> [--mode strict|best_effort] [--dry-run] [--replace|--merge]
+        \\
+    , .{});
+}
+
+fn printImportSummary(
+    w: *std.Io.Writer,
+    summary: import_bitwarden.ImportSummary,
+    options: import_bitwarden.ImportOptions,
+) !void {
+    const mode_label = switch (options.mode) {
+        .strict => "strict",
+        .best_effort => "best_effort",
+    };
+    const action_label = switch (options.action) {
+        .replace => "replace",
+        .merge => "merge",
+    };
+
+    try w.print("{s}{s} Import summary{s}\n", .{
+        Color.green, utils.Icon.check, Color.reset,
+    });
+    try w.print("  source: {s}\n", .{@tagName(summary.source)});
+    try w.print("  mode: {s}\n", .{mode_label});
+    try w.print("  action: {s}\n", .{action_label});
+    try w.print("  dry-run: {s}\n", .{if (options.dry_run) "true" else "false"});
+    try w.print("  folders: {d}, collections: {d}\n", .{ summary.folders, summary.collections });
+    try w.print(
+        "  items total: {d} (login {d}, notes {d}, card {d}, identity {d})\n",
+        .{
+            summary.items_total,
+            summary.items_login,
+            summary.items_secure_note,
+            summary.items_card,
+            summary.items_identity,
+        },
+    );
+    try w.print(
+        "  result: imported={d} replaced={d} merged={d} skipped={d} categories={d}\n",
+        .{
+            summary.imported_items,
+            summary.replaced_items,
+            summary.merged_items,
+            summary.skipped_items,
+            summary.imported_categories,
+        },
+    );
+    try w.print("  warnings: {d}\n", .{summary.warning_count});
+
+    if (options.dry_run) {
+        try w.print("  {s}No changes written (dry-run).{s}\n", .{ Color.dim, Color.reset });
+    } else {
+        try w.print("  {s}Vault updated and saved.{s}\n", .{ Color.dim, Color.reset });
+    }
+}
+
 // Include all module tests
 comptime {
     _ = @import("model.zig");
@@ -196,4 +321,5 @@ comptime {
     _ = @import("vault_service.zig");
     _ = @import("schema_v2.zig");
     _ = @import("relations_v2.zig");
+    _ = @import("import_bitwarden.zig");
 }

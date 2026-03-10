@@ -42,6 +42,13 @@ zig build run
 zig build test
 ```
 
+## Bitwarden import
+
+```bash
+enthropy import bitwarden --file /path/to/bitwarden.json --mode strict --replace
+enthropy import bitwarden --file /path/to/bitwarden.json --mode best_effort --dry-run --merge
+```
+
 ## Notes
 
 - `english.txt` is the BIP-39 English wordlist used for password generation.
