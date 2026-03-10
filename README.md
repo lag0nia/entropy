@@ -1,4 +1,4 @@
-# enthropy
+# entropy
 
 Terminal password manager written in Zig.
 
