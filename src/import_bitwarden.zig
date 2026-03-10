@@ -488,17 +488,8 @@ fn mapItemToRuntime(
     if (src.notes) |n| try notes_builder.appendSlice(allocator, n);
 
     if (src.type != 1) {
-        summary.warning_count += 1;
         if (notes_builder.items.len > 0) try notes_builder.appendSlice(allocator, "\n\n");
-        try notes_builder.appendSlice(allocator, "[bitwarden] non-login item flattened to runtime fields");
-    } else if (src.login) |login| {
-        if (login.totp != null or (login.uris != null and login.uris.?.len > 0)) {
-            summary.warning_count += 1;
-        }
-    }
-
-    if (src.fields != null or src.attachments != null or src.passwordHistory != null) {
-        summary.warning_count += 1;
+        try notes_builder.appendSlice(allocator, "[bitwarden] runtime projection flattened non-login fields");
     }
 
     var now_buf: [20]u8 = undefined;
@@ -589,85 +580,12 @@ fn replaceVault(
     };
 }
 
-fn mergeVault(
-    allocator: std.mem.Allocator,
-    target_vault: *model.Vault,
-    imported: *const model.Vault,
-    summary: *ImportSummary,
-) ImportError!void {
-    var category_name_to_id = std.StringHashMap([]const u8).init(allocator);
-    defer category_name_to_id.deinit();
-    for (target_vault.categories) |category| {
-        try category_name_to_id.put(category.name, category.id);
-    }
-
-    var imported_cat_to_final_id = std.StringHashMap([]const u8).init(allocator);
-    defer imported_cat_to_final_id.deinit();
-
-    for (imported.categories) |category| {
-        if (category_name_to_id.get(category.name)) |existing_id| {
-            try imported_cat_to_final_id.put(category.id, existing_id);
-            continue;
-        }
-
-        var cloned = try model.cloneCategory(allocator, category);
-        errdefer model.freeCategory(allocator, &cloned);
-        try appendCategory(allocator, target_vault, cloned);
-        try category_name_to_id.put(target_vault.categories[target_vault.categories.len - 1].name, target_vault.categories[target_vault.categories.len - 1].id);
-        try imported_cat_to_final_id.put(category.id, target_vault.categories[target_vault.categories.len - 1].id);
-        summary.imported_categories += 1;
-    }
-
-    var item_id_to_index = std.StringHashMap(usize).init(allocator);
-    defer item_id_to_index.deinit();
-    for (target_vault.items, 0..) |item, idx| {
-        try item_id_to_index.put(item.id, idx);
-    }
-
-    for (imported.items) |item| {
-        var cloned = try model.cloneItem(allocator, item);
-        errdefer model.freeItem(allocator, &cloned);
-
-        if (cloned.category_id) |imported_cat_id| {
-            if (imported_cat_to_final_id.get(imported_cat_id)) |final_cat_id| {
-                allocator.free(imported_cat_id);
-                cloned.category_id = try allocator.dupe(u8, final_cat_id);
-            } else {
-                allocator.free(imported_cat_id);
-                cloned.category_id = null;
-                summary.warning_count += 1;
-            }
-        }
-
-        if (item_id_to_index.get(cloned.id)) |existing_idx| {
-            model.freeItem(allocator, &target_vault.items[existing_idx]);
-            target_vault.items[existing_idx] = cloned;
-            summary.replaced_items += 1;
-        } else {
-            try appendItem(allocator, target_vault, cloned);
-            try item_id_to_index.put(target_vault.items[target_vault.items.len - 1].id, target_vault.items.len - 1);
-            summary.merged_items += 1;
-        }
-    }
-
-    summary.imported_items = target_vault.items.len;
-}
-
 fn appendItem(allocator: std.mem.Allocator, vault: *model.Vault, item: model.Item) !void {
     const old = vault.items;
     var items = std.ArrayList(model.Item){};
     try items.appendSlice(allocator, old);
     try items.append(allocator, item);
     vault.items = try items.toOwnedSlice(allocator);
-    allocator.free(old);
-}
-
-fn appendCategory(allocator: std.mem.Allocator, vault: *model.Vault, category: model.Category) !void {
-    const old = vault.categories;
-    var categories = std.ArrayList(model.Category){};
-    try categories.appendSlice(allocator, old);
-    try categories.append(allocator, category);
-    vault.categories = try categories.toOwnedSlice(allocator);
     allocator.free(old);
 }
 
@@ -1144,4 +1062,111 @@ test "import merge is idempotent on repeated runs" {
     var loaded_v2 = try storage.loadVaultV2(allocator, password, vault_path);
     defer loaded_v2.deinit();
     try std.testing.expectEqual(@as(usize, 1), loaded_v2.vault.items.len);
+}
+
+test "import merge preserves organization collection links in v2 payload" {
+    try crypto.init();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var vault = try makeEmptyVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    const vault_path = try makeTempPath(allocator, &tmp, "vault.enc");
+    defer allocator.free(vault_path);
+    const password = "master";
+    const salt = crypto.generateSalt();
+    const key = try crypto.deriveKey(password, &salt);
+    try storage.saveVault(allocator, vault, &key, &salt, vault_path);
+
+    const import_path = try makeTempPath(allocator, &tmp, "bw.json");
+    defer allocator.free(import_path);
+    try writeFile(import_path,
+        \\{
+        \\  "collections":[{"id":"c1","organizationId":"org-1","name":"Engineering"}],
+        \\  "items":[
+        \\    {
+        \\      "id":"org-item",
+        \\      "type":2,
+        \\      "name":"shared-note",
+        \\      "organizationId":"org-1",
+        \\      "collectionIds":["c1"],
+        \\      "secureNote":{"type":0}
+        \\    }
+        \\  ]
+        \\}
+    );
+
+    var target: ImportTarget = .{
+        .vault = &vault,
+        .key = &key,
+        .salt = &salt,
+        .vault_path = vault_path,
+    };
+
+    _ = try importFromBitwardenJsonFile(allocator, &target, import_path, .{
+        .mode = .strict,
+        .dry_run = false,
+        .action = .merge,
+    });
+
+    var loaded_v2 = try storage.loadVaultV2(allocator, password, vault_path);
+    defer loaded_v2.deinit();
+    try std.testing.expectEqual(@as(usize, 1), loaded_v2.vault.collections.len);
+    try std.testing.expectEqualStrings("org-1", loaded_v2.vault.collections[0].organizationId.?);
+    try std.testing.expectEqual(@as(usize, 1), loaded_v2.vault.items.len);
+    try std.testing.expectEqualStrings("org-1", loaded_v2.vault.items[0].organizationId.?);
+    try std.testing.expect(loaded_v2.vault.items[0].collectionIds != null);
+    try std.testing.expectEqual(@as(usize, 1), loaded_v2.vault.items[0].collectionIds.?.len);
+    try std.testing.expectEqualStrings("c1", loaded_v2.vault.items[0].collectionIds.?[0].?);
+}
+
+test "import dry-run leaves encrypted vault unchanged" {
+    try crypto.init();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var vault = try makeEmptyVault(allocator);
+    defer model.freeVault(allocator, &vault);
+    try appendRuntimeItem(allocator, &vault, "seed-id", "seed-pw");
+
+    const vault_path = try makeTempPath(allocator, &tmp, "vault.enc");
+    defer allocator.free(vault_path);
+    const password = "master";
+    const salt = crypto.generateSalt();
+    const key = try crypto.deriveKey(password, &salt);
+    try storage.saveVault(allocator, vault, &key, &salt, vault_path);
+
+    const before = try readFileAlloc(allocator, vault_path);
+    defer allocator.free(before);
+
+    const import_path = try makeTempPath(allocator, &tmp, "bw.json");
+    defer allocator.free(import_path);
+    try writeFile(import_path,
+        \\{
+        \\  "items":[
+        \\    {"id":"id-1","type":1,"name":"new","login":{"username":"u","password":"pw"}}
+        \\  ]
+        \\}
+    );
+
+    var target: ImportTarget = .{
+        .vault = &vault,
+        .key = &key,
+        .salt = &salt,
+        .vault_path = vault_path,
+    };
+    _ = try importFromBitwardenJsonFile(allocator, &target, import_path, .{
+        .mode = .strict,
+        .dry_run = true,
+        .action = .replace,
+    });
+
+    const after = try readFileAlloc(allocator, vault_path);
+    defer allocator.free(after);
+    try std.testing.expectEqualStrings(before, after);
 }

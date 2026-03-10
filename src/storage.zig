@@ -810,6 +810,32 @@ test "loadVaultV2 upgrades legacy runtime payloads to v2 shape" {
     try std.testing.expectEqualStrings("dev@example.com", loaded.vault.items[0].login.?.username.?);
 }
 
+test "loadVaultV2WithKey decrypts and parses without master password" {
+    try crypto.init();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const vault_path = try makeTempVaultPath(allocator, &tmp);
+    defer allocator.free(vault_path);
+
+    var vault = try makeSampleVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    const password = "with-key";
+    const salt = crypto.generateSalt();
+    const key = try crypto.deriveKey(password, &salt);
+    try saveVault(allocator, vault, &key, &salt, vault_path);
+
+    var loaded = try loadVaultV2WithKey(allocator, &key, vault_path);
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), loaded.vault.items.len);
+    try std.testing.expectEqual(@as(usize, 1), loaded.vault.folders.len);
+    try std.testing.expect(loaded.vault.items[0].login != null);
+    try std.testing.expectEqualStrings("dev@example.com", loaded.vault.items[0].login.?.username.?);
+}
+
 test "saveVault stores v2 payload format" {
     try crypto.init();
     const allocator = std.testing.allocator;
