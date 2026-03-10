@@ -223,6 +223,76 @@ pub fn loadVaultV2(
     };
 }
 
+pub fn loadVaultV2WithKey(
+    allocator: std.mem.Allocator,
+    key: *const [crypto.KEY_LEN]u8,
+    vault_path: []const u8,
+) !LoadedVaultV2 {
+    const file = std.fs.cwd().openFile(vault_path, .{ .mode = .read_only }) catch
+        return StorageError.VaultNotFound;
+    defer file.close();
+
+    const data = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
+    defer allocator.free(data);
+
+    const parsed = std.json.parseFromSlice(model.EncryptedVault, allocator, data, .{}) catch
+        return StorageError.CorruptedVault;
+    defer parsed.deinit();
+
+    const wrapper = parsed.value;
+    try validateWrapperMetadata(wrapper);
+
+    var salt: [crypto.SALT_LEN]u8 = undefined;
+    const salt_len = base64_decoder.calcSizeForSlice(wrapper.kdf.salt) catch
+        return StorageError.CorruptedVault;
+    if (salt_len != crypto.SALT_LEN) return StorageError.InvalidFormat;
+    base64_decoder.decode(&salt, wrapper.kdf.salt) catch return StorageError.CorruptedVault;
+
+    var nonce: [crypto.NONCE_LEN]u8 = undefined;
+    const nonce_len = base64_decoder.calcSizeForSlice(wrapper.cipher.nonce) catch
+        return StorageError.CorruptedVault;
+    if (nonce_len != crypto.NONCE_LEN) return StorageError.InvalidFormat;
+    base64_decoder.decode(&nonce, wrapper.cipher.nonce) catch return StorageError.CorruptedVault;
+
+    const ct_len = base64_decoder.calcSizeForSlice(wrapper.cipher.ciphertext) catch
+        return StorageError.CorruptedVault;
+    if (ct_len < crypto.TAG_LEN) return StorageError.InvalidFormat;
+    const ciphertext = allocator.alloc(u8, ct_len) catch return StorageError.CorruptedVault;
+    defer allocator.free(ciphertext);
+    base64_decoder.decode(ciphertext, wrapper.cipher.ciphertext) catch return StorageError.CorruptedVault;
+
+    const plaintext = crypto.decrypt(allocator, ciphertext, &nonce, key) catch
+        return StorageError.CorruptedVault;
+    defer {
+        crypto.zeroize(plaintext);
+        allocator.free(plaintext);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+
+    const v2: schema.VaultV2 = if (std.json.parseFromSlice(schema.VaultV2, a, plaintext, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    })) |v2_parsed| blk: {
+        break :blk v2_parsed.value;
+    } else |_| blk: {
+        const v1_parsed = std.json.parseFromSlice(model.Vault, a, plaintext, .{
+            .allocate = .alloc_always,
+        }) catch
+            return StorageError.CorruptedVault;
+        break :blk try runtimeVaultToV2View(a, v1_parsed.value);
+    };
+
+    return .{
+        .arena = arena,
+        .vault = v2,
+        .key = key.*,
+        .salt = salt,
+    };
+}
+
 /// Load and decrypt vault from disk
 pub fn loadVault(
     allocator: std.mem.Allocator,

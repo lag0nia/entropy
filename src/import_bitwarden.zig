@@ -141,78 +141,120 @@ pub fn importFromBitwardenJsonFile(
         }
     }
 
-    var imported_runtime = try toRuntimeVault(allocator, &bitwarden, options.mode, &summary);
-    errdefer model.freeVault(allocator, &imported_runtime);
+    var loaded_current: ?storage.LoadedVaultV2 = storage.loadVaultV2WithKey(
+        allocator,
+        target.key,
+        target.vault_path,
+    ) catch |err| switch (err) {
+        storage.StorageError.VaultNotFound => null,
+        else => return err,
+    };
+    defer if (loaded_current) |*loaded| loaded.deinit();
+
+    var empty_current: schema.VaultV2 = .{
+        .version = 2,
+        .encrypted = false,
+        .source = .unknown,
+        .folders = &.{},
+        .collections = &.{},
+        .items = &.{},
+    };
+    const current_v2: *const schema.VaultV2 = if (loaded_current) |*loaded| &loaded.vault else &empty_current;
 
     if (options.dry_run) {
-        estimateDryRunSummary(target.vault, &imported_runtime, options.action, &summary);
-        model.freeVault(allocator, &imported_runtime);
+        try estimateDryRunSummaryV2(allocator, current_v2, &bitwarden, options.action, &summary);
         return summary;
     }
 
-    switch (options.action) {
-        .replace => {
-            summary.imported_categories = imported_runtime.categories.len;
-            summary.imported_items = imported_runtime.items.len;
-            replaceVault(allocator, target.vault, &imported_runtime);
-        },
-        .merge => {
-            try mergeVault(allocator, target.vault, &imported_runtime, &summary);
-            model.freeVault(allocator, &imported_runtime);
-        },
-    }
+    var merged_v2: ?schema.VaultV2 = null;
+    defer if (merged_v2) |*vault| freeShallowVaultSlices(allocator, vault);
 
-    try storage.saveVault(
+    const final_v2: *const schema.VaultV2 = switch (options.action) {
+        .replace => blk: {
+            summary.imported_categories = bitwarden.folders.len + bitwarden.collections.len;
+            summary.imported_items = bitwarden.items.len;
+            break :blk &bitwarden;
+        },
+        .merge => blk: {
+            var merged = try mergeVaultV2(allocator, current_v2, &bitwarden, &summary);
+            merged.source = schema.detectSource(&merged);
+            merged_v2 = merged;
+            break :blk &merged_v2.?;
+        },
+    };
+
+    try storage.saveVaultV2(
         allocator,
-        target.vault.*,
+        final_v2.*,
         target.key,
         target.salt,
         target.vault_path,
     );
 
+    var projection_summary: ImportSummary = .{};
+    var runtime = try toRuntimeVault(allocator, final_v2, .best_effort, &projection_summary);
+    replaceVault(allocator, target.vault, &runtime);
+
     return summary;
 }
 
-fn estimateDryRunSummary(
-    current: *const model.Vault,
-    imported: *const model.Vault,
+fn estimateDryRunSummaryV2(
+    allocator: std.mem.Allocator,
+    current: *const schema.VaultV2,
+    imported: *const schema.VaultV2,
     action: ImportAction,
     summary: *ImportSummary,
-) void {
+) !void {
     switch (action) {
         .replace => {
-            summary.imported_categories = imported.categories.len;
+            summary.imported_categories = imported.folders.len + imported.collections.len;
             summary.imported_items = imported.items.len;
         },
         .merge => {
-            for (imported.categories) |cat| {
-                if (findCategoryByName(current.categories, cat.name) == null) {
+            var folder_ids = std.StringHashMap(void).init(allocator);
+            defer folder_ids.deinit();
+            for (current.folders) |folder| {
+                try folder_ids.put(folder.id, {});
+            }
+            for (imported.folders) |folder| {
+                const gop = try folder_ids.getOrPut(folder.id);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = {};
                     summary.imported_categories += 1;
                 }
             }
-            for (imported.items) |item| {
-                if (findItemIndexById(current.items, item.id) != null) {
-                    summary.replaced_items += 1;
-                } else {
-                    summary.merged_items += 1;
+            var collection_ids = std.StringHashMap(void).init(allocator);
+            defer collection_ids.deinit();
+            for (current.collections) |collection| {
+                try collection_ids.put(collection.id, {});
+            }
+            for (imported.collections) |collection| {
+                const gop = try collection_ids.getOrPut(collection.id);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = {};
+                    summary.imported_categories += 1;
                 }
             }
+
+            var item_ids = std.StringHashMap(void).init(allocator);
+            defer item_ids.deinit();
+            for (current.items) |item| {
+                try item_ids.put(item.id, {});
+            }
+            var final_count = current.items.len;
+            for (imported.items) |item| {
+                const gop = try item_ids.getOrPut(item.id);
+                if (gop.found_existing) {
+                    summary.replaced_items += 1;
+                } else {
+                    gop.value_ptr.* = {};
+                    summary.merged_items += 1;
+                    final_count += 1;
+                }
+            }
+            summary.imported_items = final_count;
         },
     }
-}
-
-fn findCategoryByName(categories: []const model.Category, name: []const u8) ?usize {
-    for (categories, 0..) |category, idx| {
-        if (std.mem.eql(u8, category.name, name)) return idx;
-    }
-    return null;
-}
-
-fn findItemIndexById(items: []const model.Item, id: []const u8) ?usize {
-    for (items, 0..) |item, idx| {
-        if (std.mem.eql(u8, item.id, id)) return idx;
-    }
-    return null;
 }
 
 fn countByType(summary: *ImportSummary, items: []const schema.Item) void {
@@ -225,6 +267,94 @@ fn countByType(summary: *ImportSummary, items: []const schema.Item) void {
             else => summary.skipped_items += 1,
         }
     }
+}
+
+fn mergeVaultV2(
+    allocator: std.mem.Allocator,
+    current: *const schema.VaultV2,
+    imported: *const schema.VaultV2,
+    summary: *ImportSummary,
+) !schema.VaultV2 {
+    var folders = std.ArrayList(schema.Folder){};
+    errdefer folders.deinit(allocator);
+    try folders.appendSlice(allocator, current.folders);
+
+    var folder_ids = std.StringHashMap(void).init(allocator);
+    defer folder_ids.deinit();
+    for (current.folders) |folder| {
+        try folder_ids.put(folder.id, {});
+    }
+    for (imported.folders) |folder| {
+        const gop = try folder_ids.getOrPut(folder.id);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = {};
+            try folders.append(allocator, folder);
+            summary.imported_categories += 1;
+        }
+    }
+
+    var collections = std.ArrayList(schema.Collection){};
+    errdefer collections.deinit(allocator);
+    try collections.appendSlice(allocator, current.collections);
+
+    var collection_ids = std.StringHashMap(void).init(allocator);
+    defer collection_ids.deinit();
+    for (current.collections) |collection| {
+        try collection_ids.put(collection.id, {});
+    }
+    for (imported.collections) |collection| {
+        const gop = try collection_ids.getOrPut(collection.id);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = {};
+            try collections.append(allocator, collection);
+            summary.imported_categories += 1;
+        }
+    }
+
+    var items = std.ArrayList(schema.Item){};
+    errdefer items.deinit(allocator);
+    try items.appendSlice(allocator, current.items);
+
+    var item_ids = std.StringHashMap(usize).init(allocator);
+    defer item_ids.deinit();
+    for (current.items, 0..) |item, idx| {
+        try item_ids.put(item.id, idx);
+    }
+    for (imported.items) |item| {
+        if (item_ids.get(item.id)) |existing_idx| {
+            items.items[existing_idx] = item;
+            summary.replaced_items += 1;
+        } else {
+            try items.append(allocator, item);
+            try item_ids.put(item.id, items.items.len - 1);
+            summary.merged_items += 1;
+        }
+    }
+
+    summary.imported_items = items.items.len;
+
+    return .{
+        .version = 2,
+        .encrypted = false,
+        .source = if (imported.source != .unknown) imported.source else current.source,
+        .folders = try folders.toOwnedSlice(allocator),
+        .collections = try collections.toOwnedSlice(allocator),
+        .items = try items.toOwnedSlice(allocator),
+    };
+}
+
+fn freeShallowVaultSlices(allocator: std.mem.Allocator, vault: *schema.VaultV2) void {
+    allocator.free(vault.folders);
+    allocator.free(vault.collections);
+    allocator.free(vault.items);
+    vault.* = .{
+        .version = 2,
+        .encrypted = false,
+        .source = .unknown,
+        .folders = &.{},
+        .collections = &.{},
+        .items = &.{},
+    };
 }
 
 fn toRuntimeVault(
@@ -669,7 +799,7 @@ test "import best_effort continues with warnings and dry-run does not mutate vau
     try std.testing.expectEqual(@as(usize, 0), vault.items.len);
 }
 
-test "import replace persists imported vault" {
+test "import replace persists full v2 fields" {
     try crypto.init();
     const allocator = std.testing.allocator;
 
@@ -681,13 +811,23 @@ test "import replace persists imported vault" {
     try writeFile(import_path,
         \\{
         \\  "folders": [{"id":"f1","name":"Personal"}],
-        \\  "items": [{
-        \\    "id":"new-id",
-        \\    "folderId":"f1",
-        \\    "type":1,
-        \\    "name":"github",
-        \\    "login":{"username":"dev@example.com","password":"newpw"}
-        \\  }]
+        \\  "items": [
+        \\    {
+        \\      "id":"new-id",
+        \\      "folderId":"f1",
+        \\      "type":1,
+        \\      "name":"github",
+        \\      "login":{"username":"dev@example.com","password":"newpw"}
+        \\    },
+        \\    {
+        \\      "id":"card-id",
+        \\      "type":3,
+        \\      "name":"visa",
+        \\      "card":{"number":"4111111111111111","code":"123"},
+        \\      "fields":[{"name":"pin","value":"9999","type":0}],
+        \\      "attachments":[{"id":"a1","fileName":"card.png","size":"128"}]
+        \\    }
+        \\  ]
         \\}
     );
 
@@ -714,25 +854,65 @@ test "import replace persists imported vault" {
         .action = .replace,
     });
 
-    try std.testing.expectEqual(@as(usize, 1), summary.imported_items);
-    try std.testing.expectEqual(@as(usize, 1), vault.items.len);
-    try std.testing.expectEqualStrings("new-id", vault.items[0].id);
+    try std.testing.expectEqual(@as(usize, 2), summary.imported_items);
+    try std.testing.expectEqual(@as(usize, 2), vault.items.len);
 
     const loaded = try storage.loadVault(allocator, password, vault_path);
     defer {
         model.freeVault(allocator, @constCast(&loaded.vault));
         crypto.zeroize(@constCast(&loaded.key));
     }
-    try std.testing.expectEqual(@as(usize, 1), loaded.vault.items.len);
-    try std.testing.expectEqualStrings("new-id", loaded.vault.items[0].id);
+    try std.testing.expectEqual(@as(usize, 2), loaded.vault.items.len);
+
+    var loaded_v2 = try storage.loadVaultV2(allocator, password, vault_path);
+    defer loaded_v2.deinit();
+    try std.testing.expectEqual(@as(usize, 2), loaded_v2.vault.items.len);
+    try std.testing.expect(loaded_v2.vault.items[1].card != null);
+    try std.testing.expectEqualStrings("4111111111111111", loaded_v2.vault.items[1].card.?.number.?);
+    try std.testing.expect(loaded_v2.vault.items[1].fields != null);
+    try std.testing.expectEqual(@as(usize, 1), loaded_v2.vault.items[1].fields.?.len);
+    try std.testing.expect(loaded_v2.vault.items[1].attachments != null);
+    try std.testing.expectEqual(@as(usize, 1), loaded_v2.vault.items[1].attachments.?.len);
 }
 
-test "import merge replaces matching id and appends new item" {
+test "import merge keeps existing v2 fields and appends new typed items" {
     try crypto.init();
     const allocator = std.testing.allocator;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+
+    var vault = try makeEmptyVault(allocator);
+    defer model.freeVault(allocator, &vault);
+
+    const vault_path = try makeTempPath(allocator, &tmp, "vault.enc");
+    defer allocator.free(vault_path);
+    const password = "master";
+    const salt = crypto.generateSalt();
+    const key = try crypto.deriveKey(password, &salt);
+
+    var seed_v2_parsed = try std.json.parseFromSlice(schema.VaultV2, allocator,
+        \\{
+        \\  "version":2,
+        \\  "items":[
+        \\    {
+        \\      "id":"same-id",
+        \\      "type":3,
+        \\      "name":"same-card",
+        \\      "card":{"number":"4000000000000002","code":"000"}
+        \\    }
+        \\  ]
+        \\}
+    , .{ .ignore_unknown_fields = true });
+    defer seed_v2_parsed.deinit();
+    try storage.saveVaultV2(allocator, seed_v2_parsed.value, &key, &salt, vault_path);
+    const seeded_runtime = try storage.loadVault(allocator, password, vault_path);
+    defer {
+        model.freeVault(allocator, @constCast(&seeded_runtime.vault));
+        crypto.zeroize(@constCast(&seeded_runtime.key));
+    }
+    model.freeVault(allocator, &vault);
+    vault = try model.cloneVault(allocator, seeded_runtime.vault);
 
     const import_path = try makeTempPath(allocator, &tmp, "bw.json");
     defer allocator.free(import_path);
@@ -747,23 +927,13 @@ test "import merge replaces matching id and appends new item" {
         \\    },
         \\    {
         \\      "id":"new-id",
-        \\      "type":1,
-        \\      "name":"new",
-        \\      "login":{"username":"u2","password":"pw2"}
+        \\      "type":4,
+        \\      "name":"new-identity",
+        \\      "identity":{"email":"u2@example.com","firstName":"U2"}
         \\    }
         \\  ]
         \\}
     );
-
-    var vault = try makeEmptyVault(allocator);
-    defer model.freeVault(allocator, &vault);
-    try appendRuntimeItem(allocator, &vault, "same-id", "oldpw");
-
-    const vault_path = try makeTempPath(allocator, &tmp, "vault.enc");
-    defer allocator.free(vault_path);
-    const password = "master";
-    const salt = crypto.generateSalt();
-    const key = try crypto.deriveKey(password, &salt);
 
     var target: ImportTarget = .{
         .vault = &vault,
@@ -782,15 +952,23 @@ test "import merge replaces matching id and appends new item" {
     try std.testing.expectEqual(@as(usize, 1), summary.replaced_items);
     try std.testing.expectEqual(@as(usize, 1), summary.merged_items);
 
+    var loaded_v2 = try storage.loadVaultV2(allocator, password, vault_path);
+    defer loaded_v2.deinit();
+    try std.testing.expectEqual(@as(usize, 2), loaded_v2.vault.items.len);
+
     var found_same = false;
     var found_new = false;
-    for (vault.items) |item| {
+    for (loaded_v2.vault.items) |item| {
         if (std.mem.eql(u8, item.id, "same-id")) {
             found_same = true;
-            try std.testing.expectEqualStrings("newpw", item.password);
+            try std.testing.expect(item.login != null);
+            try std.testing.expectEqualStrings("newpw", item.login.?.password.?);
+            try std.testing.expect(item.card == null);
         }
         if (std.mem.eql(u8, item.id, "new-id")) {
             found_new = true;
+            try std.testing.expect(item.identity != null);
+            try std.testing.expectEqualStrings("u2@example.com", item.identity.?.email.?);
         }
     }
     try std.testing.expect(found_same);
