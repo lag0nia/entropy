@@ -13,6 +13,19 @@ pub const StorageError = error{
 const base64_encoder = std.base64.standard.Encoder;
 const base64_decoder = std.base64.standard.Decoder;
 
+pub const LoadedVaultV2 = struct {
+    arena: std.heap.ArenaAllocator,
+    vault: schema.VaultV2,
+    key: [crypto.KEY_LEN]u8,
+    salt: [crypto.SALT_LEN]u8,
+
+    pub fn deinit(self: *LoadedVaultV2) void {
+        crypto.zeroize(self.key[0..]);
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
 /// Get the default vault file path: ~/.config/enthropy/vault.enc
 pub fn getVaultPath(allocator: std.mem.Allocator) ![]const u8 {
     const home = std.process.getEnvVarOwned(allocator, "HOME") catch
@@ -49,14 +62,33 @@ pub fn saveVault(
     defer arena.deinit();
     const v2_payload = try runtimeVaultToV2View(arena.allocator(), vault);
 
-    const plaintext = jsonStringifyAlloc(allocator, v2_payload) catch
+    return saveVaultV2(allocator, v2_payload, key, salt, vault_path);
+}
+
+pub fn saveVaultV2(
+    allocator: std.mem.Allocator,
+    vault: schema.VaultV2,
+    key: *const [crypto.KEY_LEN]u8,
+    salt: *const [crypto.SALT_LEN]u8,
+    vault_path: []const u8,
+) !void {
+    const plaintext = jsonStringifyAlloc(allocator, vault) catch
         return StorageError.WriteError;
     defer {
         crypto.zeroize(plaintext);
         allocator.free(plaintext);
     }
 
-    // Encrypt
+    return saveEncryptedPayload(allocator, plaintext, key, salt, vault_path);
+}
+
+fn saveEncryptedPayload(
+    allocator: std.mem.Allocator,
+    plaintext: []const u8,
+    key: *const [crypto.KEY_LEN]u8,
+    salt: *const [crypto.SALT_LEN]u8,
+    vault_path: []const u8,
+) !void {
     const encrypted = crypto.encrypt(allocator, plaintext, key) catch
         return StorageError.WriteError;
     defer allocator.free(encrypted.ciphertext);
@@ -108,13 +140,11 @@ pub fn saveVault(
     file.writeAll(wrapper_json) catch return StorageError.WriteError;
 }
 
-/// Load and decrypt vault from disk
-pub fn loadVault(
+pub fn loadVaultV2(
     allocator: std.mem.Allocator,
     password: []const u8,
     vault_path: []const u8,
-) !struct { vault: model.Vault, key: [crypto.KEY_LEN]u8, salt: [crypto.SALT_LEN]u8 } {
-    // Read encrypted wrapper
+) !LoadedVaultV2 {
     const file = std.fs.cwd().openFile(vault_path, .{ .mode = .read_only }) catch
         return StorageError.VaultNotFound;
     defer file.close();
@@ -122,7 +152,6 @@ pub fn loadVault(
     const data = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
     defer allocator.free(data);
 
-    // Parse wrapper JSON
     const parsed = std.json.parseFromSlice(model.EncryptedVault, allocator, data, .{}) catch
         return StorageError.CorruptedVault;
     defer parsed.deinit();
@@ -130,7 +159,6 @@ pub fn loadVault(
     const wrapper = parsed.value;
     try validateWrapperMetadata(wrapper);
 
-    // Decode base64 fields
     var salt: [crypto.SALT_LEN]u8 = undefined;
     const salt_len = base64_decoder.calcSizeForSlice(wrapper.kdf.salt) catch
         return StorageError.CorruptedVault;
@@ -150,10 +178,9 @@ pub fn loadVault(
     defer allocator.free(ciphertext);
     base64_decoder.decode(ciphertext, wrapper.cipher.ciphertext) catch return StorageError.CorruptedVault;
 
-    // Derive key
     const mem_limit = std.math.cast(usize, wrapper.kdf.mem_limit) orelse
         return StorageError.InvalidFormat;
-    const key = crypto.deriveKeyWithParams(
+    var key = crypto.deriveKeyWithParams(
         password,
         &salt,
         wrapper.kdf.ops_limit,
@@ -162,8 +189,8 @@ pub fn loadVault(
         crypto.CryptoError.InvalidKdfParams => return StorageError.InvalidFormat,
         else => return StorageError.CorruptedVault,
     };
+    errdefer crypto.zeroize(key[0..]);
 
-    // Decrypt
     const plaintext = crypto.decrypt(allocator, ciphertext, &nonce, &key) catch
         return StorageError.CorruptedVault;
     defer {
@@ -171,14 +198,47 @@ pub fn loadVault(
         allocator.free(plaintext);
     }
 
-    // Parse v2 payload first. If it fails, fallback to legacy v1 payload.
-    const vault = parseRuntimeVaultPayload(allocator, plaintext) catch
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const a = arena.allocator();
+
+    const v2: schema.VaultV2 = if (std.json.parseFromSlice(schema.VaultV2, a, plaintext, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    })) |v2_parsed| blk: {
+        break :blk v2_parsed.value;
+    } else |_| blk: {
+        const v1_parsed = std.json.parseFromSlice(model.Vault, a, plaintext, .{
+            .allocate = .alloc_always,
+        }) catch
+            return StorageError.CorruptedVault;
+        break :blk try runtimeVaultToV2View(a, v1_parsed.value);
+    };
+
+    return .{
+        .arena = arena,
+        .vault = v2,
+        .key = key,
+        .salt = salt,
+    };
+}
+
+/// Load and decrypt vault from disk
+pub fn loadVault(
+    allocator: std.mem.Allocator,
+    password: []const u8,
+    vault_path: []const u8,
+) !struct { vault: model.Vault, key: [crypto.KEY_LEN]u8, salt: [crypto.SALT_LEN]u8 } {
+    var loaded_v2 = try loadVaultV2(allocator, password, vault_path);
+    defer loaded_v2.deinit();
+
+    const vault = v2ToRuntimeVault(allocator, loaded_v2.vault) catch
         return StorageError.CorruptedVault;
 
     return .{
         .vault = vault,
-        .key = key,
-        .salt = salt,
+        .key = loaded_v2.key,
+        .salt = loaded_v2.salt,
     };
 }
 
@@ -582,6 +642,102 @@ test "saveVault and loadVault roundtrip" {
     try std.testing.expectEqualStrings("dev@example.com", loaded.vault.items[0].mail.?);
     try std.testing.expectEqualStrings("super-secret", loaded.vault.items[0].password);
     try std.testing.expectEqualStrings("work", loaded.vault.categories[0].name);
+}
+
+test "saveVaultV2 and loadVaultV2 preserve typed Bitwarden fields" {
+    try crypto.init();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const vault_path = try makeTempVaultPath(allocator, &tmp);
+    defer allocator.free(vault_path);
+
+    const input_json =
+        \\{
+        \\  "version": 2,
+        \\  "encrypted": false,
+        \\  "folders": [{"id":"f1","name":"Personal"}],
+        \\  "collections": [{"id":"c1","organizationId":"org-1","name":"Shared","externalId":"ext-1"}],
+        \\  "items": [
+        \\    {
+        \\      "id":"item-login",
+        \\      "type":1,
+        \\      "name":"GitHub",
+        \\      "folderId":"f1",
+        \\      "login":{
+        \\        "username":"dev@example.com",
+        \\        "password":"pw-login",
+        \\        "totp":"ABCDEF",
+        \\        "uris":[{"uri":"https://github.com","match":0}]
+        \\      },
+        \\      "creationDate":"2026-03-10T10:00:00.000Z",
+        \\      "revisionDate":"2026-03-10T11:00:00.000Z"
+        \\    },
+        \\    {
+        \\      "id":"item-card",
+        \\      "type":3,
+        \\      "name":"Visa",
+        \\      "collectionIds":["c1"],
+        \\      "card":{"brand":"visa","number":"4111111111111111","code":"123"},
+        \\      "fields":[{"name":"pin","value":"9999","type":0}],
+        \\      "attachments":[{"id":"a1","fileName":"statement.pdf","size":"123"}]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try std.json.parseFromSlice(schema.VaultV2, allocator, input_json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const password = "typed-v2";
+    const salt = crypto.generateSalt();
+    const key = try crypto.deriveKey(password, &salt);
+
+    try saveVaultV2(allocator, parsed.value, &key, &salt, vault_path);
+    var loaded = try loadVaultV2(allocator, password, vault_path);
+    defer loaded.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), loaded.vault.folders.len);
+    try std.testing.expectEqual(@as(usize, 1), loaded.vault.collections.len);
+    try std.testing.expectEqual(@as(usize, 2), loaded.vault.items.len);
+    try std.testing.expect(loaded.vault.items[0].login != null);
+    try std.testing.expectEqualStrings("ABCDEF", loaded.vault.items[0].login.?.totp.?);
+    try std.testing.expect(loaded.vault.items[1].card != null);
+    try std.testing.expectEqualStrings("4111111111111111", loaded.vault.items[1].card.?.number.?);
+    try std.testing.expect(loaded.vault.items[1].attachments != null);
+    try std.testing.expectEqual(@as(usize, 1), loaded.vault.items[1].attachments.?.len);
+    try std.testing.expect(loaded.vault.items[1].fields != null);
+    try std.testing.expectEqual(@as(usize, 1), loaded.vault.items[1].fields.?.len);
+}
+
+test "loadVaultV2 upgrades legacy runtime payloads to v2 shape" {
+    try crypto.init();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const vault_path = try makeTempVaultPath(allocator, &tmp);
+    defer allocator.free(vault_path);
+
+    var legacy = try makeSampleVault(allocator);
+    defer model.freeVault(allocator, &legacy);
+    const legacy_json = try jsonStringifyAlloc(allocator, legacy);
+    defer allocator.free(legacy_json);
+
+    try writeEncryptedPayload(allocator, legacy_json, "legacy-v2", vault_path);
+    var loaded = try loadVaultV2(allocator, "legacy-v2", vault_path);
+    defer loaded.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), loaded.vault.folders.len);
+    try std.testing.expectEqual(@as(usize, 1), loaded.vault.items.len);
+    try std.testing.expectEqual(@as(u8, 1), loaded.vault.items[0].type);
+    try std.testing.expect(loaded.vault.items[0].login != null);
+    try std.testing.expectEqualStrings("dev@example.com", loaded.vault.items[0].login.?.username.?);
 }
 
 test "saveVault stores v2 payload format" {
