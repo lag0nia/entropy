@@ -294,11 +294,12 @@ fn printImportSummary(
         },
     );
     try w.print(
-        "  result: imported={d} replaced={d} merged={d} skipped={d} categories={d}\n",
+        "  result: imported={d} replaced={d} merged={d} kept={d} skipped={d} categories={d}\n",
         .{
             summary.imported_items,
             summary.replaced_items,
             summary.merged_items,
+            summary.kept_items,
             summary.skipped_items,
             summary.imported_categories,
         },
