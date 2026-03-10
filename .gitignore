@@ -7,3 +7,9 @@ zig-out/
 
 # Build system
 build.zig.zon
+
+# Local test/smoke temp homes
+.tmp-home/
+.tmp-data/
+tmp-home/
+tmp-data/
