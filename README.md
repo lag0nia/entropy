@@ -18,6 +18,7 @@ The active app is split into these modules:
 - `src/tui.zig`: terminal UI state machine and CRUD interactions.
 - `src/vault_service.zig`: business logic for item/category CRUD and invariants.
 - `src/schema_v2.zig`: v2 migration schema for 1:1 Bitwarden JSON compatibility.
+- `src/relations_v2.zig`: normalized v2 container relations (`item-folder`, `item-collection`) and integrity checks.
 - `src/storage.zig`: encrypted vault persistence (JSON wrapper on disk).
 - `src/crypto.zig`: libsodium wrappers (Argon2id + XChaCha20-Poly1305).
 - `src/model.zig`: core entities (`Vault`, `Item`, `Category`) and helpers.

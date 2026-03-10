@@ -195,4 +195,5 @@ comptime {
     _ = @import("storage.zig");
     _ = @import("vault_service.zig");
     _ = @import("schema_v2.zig");
+    _ = @import("relations_v2.zig");
 }
