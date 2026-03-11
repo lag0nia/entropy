@@ -338,24 +338,6 @@ pub fn projectVaultV2ToRuntime(
     return v2ToRuntimeVault(allocator, v2);
 }
 
-fn parseRuntimeVaultPayload(
-    allocator: std.mem.Allocator,
-    plaintext: []const u8,
-) !model.Vault {
-    if (std.json.parseFromSlice(schema.VaultV2, allocator, plaintext, .{
-        .ignore_unknown_fields = true,
-    })) |v2_parsed| {
-        defer v2_parsed.deinit();
-        return try v2ToRuntimeVault(allocator, v2_parsed.value);
-    } else |_| {
-        const v1_parsed = std.json.parseFromSlice(model.Vault, allocator, plaintext, .{}) catch
-            return StorageError.CorruptedVault;
-        defer v1_parsed.deinit();
-        return model.cloneVault(allocator, v1_parsed.value) catch
-            return StorageError.CorruptedVault;
-    }
-}
-
 fn runtimeVaultToV2View(
     allocator: std.mem.Allocator,
     runtime: model.Vault,

@@ -53,7 +53,6 @@ pub const ImportSummary = struct {
 
 pub const ImportError = std.mem.Allocator.Error || std.fs.File.OpenError || std.fs.File.ReadError || error{
     InvalidBitwardenJson,
-    MissingRuntimePassword,
 } || relations.RelationError || storage.StorageError;
 
 pub const ImportTarget = struct {
