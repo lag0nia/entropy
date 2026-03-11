@@ -332,6 +332,7 @@ comptime {
     _ = @import("bip39.zig");
     _ = @import("storage.zig");
     _ = @import("vault_service.zig");
+    _ = @import("vault_service_v2.zig");
     _ = @import("schema_v2.zig");
     _ = @import("relations_v2.zig");
     _ = @import("import_bitwarden.zig");
