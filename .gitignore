@@ -13,3 +13,6 @@ build.zig.zon
 .tmp-data/
 tmp-home/
 tmp-data/
+
+.agents/
+skills-lock.json
