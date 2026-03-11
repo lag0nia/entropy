@@ -288,6 +288,8 @@ fn drawItemList(w: *Writer, state: *TuiState) !void {
             try w.writeAll("    ");
         }
 
+        try w.print("{s}[{s}]{s} ", .{ Color.dim, itemTypeLabel(item.item_type), Color.reset });
+
         // Name
         const name = item.name orelse "(unnamed)";
         if (is_selected) {
@@ -344,6 +346,11 @@ fn drawItemDetail(w: *Writer, state: *const TuiState) !void {
         Color.cyan, Color.reset, item.name orelse "(none)",
     });
 
+    // Type
+    try w.print("  {s}Type:{s}     {s}\n", .{
+        Color.cyan, Color.reset, itemTypeLabel(item.item_type),
+    });
+
     // Mail
     try w.print("  {s}Mail:{s}     {s}\n", .{
         Color.cyan, Color.reset, item.mail orelse "(none)",
@@ -377,6 +384,16 @@ fn drawItemDetail(w: *Writer, state: *const TuiState) !void {
     try w.print("  {s}p{s}{s} reveal password  {s}y{s}{s} copy password{s}\n", .{
         Color.bold, Color.reset, Color.dim, Color.bold, Color.reset, Color.dim, Color.reset,
     });
+}
+
+fn itemTypeLabel(item_type: u8) []const u8 {
+    return switch (item_type) {
+        1 => "login",
+        2 => "secure-note",
+        3 => "card",
+        4 => "identity",
+        else => "unknown",
+    };
 }
 
 fn drawCategoryList(w: *Writer, state: *TuiState) !void {

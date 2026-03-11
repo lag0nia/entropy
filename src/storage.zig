@@ -498,6 +498,7 @@ fn v2ToRuntimeVault(
 
         var out = model.Item{
             .id = try allocator.dupe(u8, src.id),
+            .item_type = src.type,
             .name = name,
             .mail = mail,
             .password = try allocator.dupe(u8, password),
@@ -892,6 +893,8 @@ test "projectVaultV2ToRuntime preserves collection-linked item references" {
 
     try std.testing.expectEqual(@as(usize, 2), runtime.items.len);
     try std.testing.expectEqual(@as(usize, 2), runtime.categories.len);
+    try std.testing.expectEqual(@as(u8, 1), runtime.items[0].item_type);
+    try std.testing.expectEqual(@as(u8, 2), runtime.items[1].item_type);
     try std.testing.expect(runtime.items[0].category_id != null);
     try std.testing.expect(runtime.items[1].category_id != null);
 }

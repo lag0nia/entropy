@@ -523,6 +523,7 @@ fn mapItemToRuntime(
 
     var out = model.Item{
         .id = try allocator.dupe(u8, src.id),
+        .item_type = src.type,
         .name = resolved_name,
         .mail = resolved_mail,
         .password = try allocator.dupe(u8, runtime_password),

@@ -5,6 +5,7 @@ pub const Uuid = [36]u8;
 
 pub const Item = struct {
     id: []const u8,
+    item_type: u8 = 1,
     name: ?[]const u8 = null,
     mail: ?[]const u8 = null,
     password: []const u8,
@@ -102,6 +103,7 @@ pub fn nowTimestamp(buf: *[20]u8) []const u8 {
 pub fn cloneItem(allocator: std.mem.Allocator, item: Item) !Item {
     return .{
         .id = try allocator.dupe(u8, item.id),
+        .item_type = item.item_type,
         .name = try dupOptional(allocator, item.name),
         .mail = try dupOptional(allocator, item.mail),
         .password = try allocator.dupe(u8, item.password),
@@ -170,6 +172,7 @@ pub fn freeItem(allocator: std.mem.Allocator, item: *Item) void {
 
     item.* = .{
         .id = "",
+        .item_type = 1,
         .name = null,
         .mail = null,
         .password = "",
