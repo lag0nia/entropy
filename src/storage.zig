@@ -57,12 +57,24 @@ pub fn saveVault(
     salt: *const [crypto.SALT_LEN]u8,
     vault_path: []const u8,
 ) !void {
-    // Persist runtime vault as v2 schema payload.
+    // Persist runtime vault as v2 schema payload while preserving existing typed metadata.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const v2_payload = try projectRuntimeVaultToV2(arena.allocator(), vault);
+    const a = arena.allocator();
+    const projected = try projectRuntimeVaultToV2(a, vault);
 
-    return saveVaultV2(allocator, v2_payload, key, salt, vault_path);
+    var loaded_existing: ?LoadedVaultV2 = loadVaultV2WithKey(allocator, key, vault_path) catch |err| switch (err) {
+        StorageError.VaultNotFound => null,
+        else => return err,
+    };
+    defer if (loaded_existing) |*existing| existing.deinit();
+
+    const final_payload = if (loaded_existing) |*existing|
+        try mergeProjectedWithExistingForSave(a, &existing.vault, &projected)
+    else
+        projected;
+
+    return saveVaultV2(allocator, final_payload, key, salt, vault_path);
 }
 
 pub fn saveVaultV2(
@@ -348,41 +360,53 @@ fn runtimeVaultToV2View(
     allocator: std.mem.Allocator,
     runtime: model.Vault,
 ) !schema.VaultV2 {
-    const folders = try allocator.alloc(schema.Folder, runtime.categories.len);
-    for (runtime.categories, 0..) |cat, i| {
-        folders[i] = .{
-            .id = cat.id,
-            .name = cat.name,
-        };
+    var folders = std.ArrayList(schema.Folder){};
+    var collections = std.ArrayList(schema.Collection){};
+    var collection_ids = std.StringHashMap([]const u8).init(allocator);
+    defer collection_ids.deinit();
+
+    for (runtime.categories) |cat| {
+        if (std.mem.startsWith(u8, cat.id, "collection:")) {
+            const collection_id = cat.id["collection:".len..];
+            const collection_name = if (std.mem.startsWith(u8, cat.name, "Collection: "))
+                cat.name["Collection: ".len..]
+            else
+                cat.name;
+            try collections.append(allocator, .{
+                .id = collection_id,
+                .organizationId = null,
+                .name = collection_name,
+                .externalId = null,
+            });
+            try collection_ids.put(cat.id, collection_id);
+        } else {
+            try folders.append(allocator, .{
+                .id = cat.id,
+                .name = cat.name,
+            });
+        }
     }
 
-    const items = try allocator.alloc(schema.Item, runtime.items.len);
-    for (runtime.items, 0..) |item, i| {
+    var items = std.ArrayList(schema.Item){};
+    for (runtime.items) |item| {
         const display_name = if (item.name) |name|
             if (name.len > 0) name else (item.mail orelse item.id)
         else
             (item.mail orelse item.id);
 
-        items[i] = .{
+        var mapped: schema.Item = .{
             .id = item.id,
             .organizationId = null,
             .folderId = item.category_id,
             .collectionIds = null,
-            .type = @intFromEnum(schema.ItemType.login),
+            .type = if (item.item_type >= 1 and item.item_type <= 4) item.item_type else 1,
             .name = display_name,
             .notes = item.notes,
             .favorite = null,
             .reprompt = null,
             .fields = null,
             .passwordHistory = null,
-            .login = .{
-                .uris = null,
-                .username = item.mail,
-                .password = item.password,
-                .totp = null,
-                .passwordRevisionDate = null,
-                .fido2Credentials = null,
-            },
+            .login = null,
             .secureNote = null,
             .card = null,
             .identity = null,
@@ -392,16 +416,163 @@ fn runtimeVaultToV2View(
             .deletedDate = null,
             .original_json = null,
         };
+
+        if (item.category_id) |cat_id| {
+            if (collection_ids.get(cat_id)) |collection_id| {
+                mapped.folderId = null;
+                const ids = try allocator.alloc(?[]const u8, 1);
+                ids[0] = collection_id;
+                mapped.collectionIds = ids;
+            }
+        }
+
+        switch (mapped.type) {
+            1 => {
+                mapped.login = .{
+                    .uris = null,
+                    .username = item.mail,
+                    .password = item.password,
+                    .totp = null,
+                    .passwordRevisionDate = null,
+                    .fido2Credentials = null,
+                };
+            },
+            2 => {
+                mapped.secureNote = .{
+                    .type = 0,
+                };
+            },
+            3 => {
+                mapped.card = .{
+                    .cardholderName = null,
+                    .brand = null,
+                    .number = item.password,
+                    .expMonth = null,
+                    .expYear = null,
+                    .code = null,
+                };
+            },
+            4 => {
+                mapped.identity = .{
+                    .title = null,
+                    .firstName = null,
+                    .middleName = null,
+                    .lastName = null,
+                    .address1 = null,
+                    .address2 = null,
+                    .address3 = null,
+                    .city = null,
+                    .state = null,
+                    .postalCode = null,
+                    .country = null,
+                    .company = null,
+                    .email = item.mail,
+                    .phone = null,
+                    .ssn = null,
+                    .username = null,
+                    .passportNumber = null,
+                    .licenseNumber = null,
+                };
+            },
+            else => {},
+        }
+        try items.append(allocator, mapped);
     }
 
     return .{
         .version = 2,
         .encrypted = false,
         .source = if (runtime.items.len == 0 and runtime.categories.len == 0) .unknown else .individual,
-        .folders = folders,
-        .collections = &.{},
-        .items = items,
+        .folders = try folders.toOwnedSlice(allocator),
+        .collections = try collections.toOwnedSlice(allocator),
+        .items = try items.toOwnedSlice(allocator),
     };
+}
+
+fn mergeProjectedWithExistingForSave(
+    allocator: std.mem.Allocator,
+    existing: *const schema.VaultV2,
+    projected: *const schema.VaultV2,
+) !schema.VaultV2 {
+    var existing_collection_by_id = std.StringHashMap(schema.Collection).init(allocator);
+    defer existing_collection_by_id.deinit();
+    for (existing.collections) |collection| {
+        try existing_collection_by_id.put(collection.id, collection);
+    }
+
+    var collections = std.ArrayList(schema.Collection){};
+    for (projected.collections) |collection| {
+        var out = collection;
+        if (existing_collection_by_id.get(collection.id)) |old| {
+            if (out.organizationId == null) out.organizationId = old.organizationId;
+            if (out.externalId == null) out.externalId = old.externalId;
+        }
+        try collections.append(allocator, out);
+    }
+
+    var existing_item_by_id = std.StringHashMap(schema.Item).init(allocator);
+    defer existing_item_by_id.deinit();
+    for (existing.items) |item| {
+        try existing_item_by_id.put(item.id, item);
+    }
+
+    var items = std.ArrayList(schema.Item){};
+    for (projected.items) |item| {
+        var out = item;
+        if (existing_item_by_id.get(item.id)) |old| {
+            out = mergeProjectedItem(old, item);
+        }
+        try items.append(allocator, out);
+    }
+
+    return .{
+        .version = 2,
+        .encrypted = false,
+        .source = if (projected.source != .unknown) projected.source else existing.source,
+        .folders = try allocator.dupe(schema.Folder, projected.folders),
+        .collections = try collections.toOwnedSlice(allocator),
+        .items = try items.toOwnedSlice(allocator),
+    };
+}
+
+fn mergeProjectedItem(existing: schema.Item, projected: schema.Item) schema.Item {
+    var out = projected;
+    if (out.organizationId == null) out.organizationId = existing.organizationId;
+    if (out.collectionIds == null) out.collectionIds = existing.collectionIds;
+
+    switch (out.type) {
+        1 => {
+            var merged_login = existing.login orelse schema.Login{};
+            if (out.login) |new_login| {
+                if (new_login.username != null) merged_login.username = new_login.username;
+                if (new_login.password != null) merged_login.password = new_login.password;
+            }
+            out.login = merged_login;
+        },
+        2 => {
+            if (out.secureNote == null) out.secureNote = existing.secureNote;
+        },
+        3 => {
+            var merged_card = existing.card orelse schema.Card{};
+            if (out.card) |new_card| {
+                if (new_card.number != null) merged_card.number = new_card.number;
+                if (new_card.brand != null) merged_card.brand = new_card.brand;
+                if (new_card.code != null) merged_card.code = new_card.code;
+            }
+            out.card = merged_card;
+        },
+        4 => {
+            var merged_identity = existing.identity orelse schema.Identity{};
+            if (out.identity) |new_identity| {
+                if (new_identity.email != null) merged_identity.email = new_identity.email;
+                if (new_identity.firstName != null) merged_identity.firstName = new_identity.firstName;
+            }
+            out.identity = merged_identity;
+        },
+        else => {},
+    }
+
+    return out;
 }
 
 fn v2ToRuntimeVault(
@@ -897,6 +1068,52 @@ test "projectVaultV2ToRuntime preserves collection-linked item references" {
     try std.testing.expectEqual(@as(u8, 2), runtime.items[1].item_type);
     try std.testing.expect(runtime.items[0].category_id != null);
     try std.testing.expect(runtime.items[1].category_id != null);
+}
+
+test "saveVault preserves existing typed card metadata for unchanged runtime item" {
+    try crypto.init();
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const vault_path = try makeTempVaultPath(allocator, &tmp);
+    defer allocator.free(vault_path);
+
+    var parsed = try std.json.parseFromSlice(schema.VaultV2, allocator,
+        \\{
+        \\  "version":2,
+        \\  "items":[
+        \\    {
+        \\      "id":"card-1",
+        \\      "type":3,
+        \\      "name":"visa",
+        \\      "card":{"brand":"visa","number":"4111111111111111","code":"123"}
+        \\    }
+        \\  ]
+        \\}
+    , .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    const password = "keep-card";
+    const salt = crypto.generateSalt();
+    const key = try crypto.deriveKey(password, &salt);
+    try saveVaultV2(allocator, parsed.value, &key, &salt, vault_path);
+
+    const loaded_runtime = try loadVault(allocator, password, vault_path);
+    defer {
+        model.freeVault(allocator, @constCast(&loaded_runtime.vault));
+        crypto.zeroize(@constCast(&loaded_runtime.key));
+    }
+    try std.testing.expectEqual(@as(u8, 3), loaded_runtime.vault.items[0].item_type);
+
+    try saveVault(allocator, loaded_runtime.vault, &key, &salt, vault_path);
+
+    var loaded_v2 = try loadVaultV2(allocator, password, vault_path);
+    defer loaded_v2.deinit();
+    try std.testing.expectEqual(@as(usize, 1), loaded_v2.vault.items.len);
+    try std.testing.expectEqual(@as(u8, 3), loaded_v2.vault.items[0].type);
+    try std.testing.expect(loaded_v2.vault.items[0].card != null);
+    try std.testing.expectEqualStrings("123", loaded_v2.vault.items[0].card.?.code.?);
 }
 
 test "saveVault stores v2 payload format" {
