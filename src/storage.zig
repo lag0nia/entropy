@@ -60,7 +60,7 @@ pub fn saveVault(
     // Persist runtime vault as v2 schema payload.
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const v2_payload = try runtimeVaultToV2View(arena.allocator(), vault);
+    const v2_payload = try projectRuntimeVaultToV2(arena.allocator(), vault);
 
     return saveVaultV2(allocator, v2_payload, key, salt, vault_path);
 }
@@ -212,7 +212,7 @@ pub fn loadVaultV2(
             .allocate = .alloc_always,
         }) catch
             return StorageError.CorruptedVault;
-        break :blk try runtimeVaultToV2View(a, v1_parsed.value);
+        break :blk try projectRuntimeVaultToV2(a, v1_parsed.value);
     };
 
     return .{
@@ -282,7 +282,7 @@ pub fn loadVaultV2WithKey(
             .allocate = .alloc_always,
         }) catch
             return StorageError.CorruptedVault;
-        break :blk try runtimeVaultToV2View(a, v1_parsed.value);
+        break :blk try projectRuntimeVaultToV2(a, v1_parsed.value);
     };
 
     return .{
@@ -302,7 +302,7 @@ pub fn loadVault(
     var loaded_v2 = try loadVaultV2(allocator, password, vault_path);
     defer loaded_v2.deinit();
 
-    const vault = v2ToRuntimeVault(allocator, loaded_v2.vault) catch
+    const vault = projectVaultV2ToRuntime(allocator, loaded_v2.vault) catch
         return StorageError.CorruptedVault;
 
     return .{
@@ -310,6 +310,20 @@ pub fn loadVault(
         .key = loaded_v2.key,
         .salt = loaded_v2.salt,
     };
+}
+
+pub fn projectRuntimeVaultToV2(
+    allocator: std.mem.Allocator,
+    runtime: model.Vault,
+) !schema.VaultV2 {
+    return runtimeVaultToV2View(allocator, runtime);
+}
+
+pub fn projectVaultV2ToRuntime(
+    allocator: std.mem.Allocator,
+    v2: schema.VaultV2,
+) !model.Vault {
+    return v2ToRuntimeVault(allocator, v2);
 }
 
 fn parseRuntimeVaultPayload(
@@ -834,6 +848,52 @@ test "loadVaultV2WithKey decrypts and parses without master password" {
     try std.testing.expectEqual(@as(usize, 1), loaded.vault.folders.len);
     try std.testing.expect(loaded.vault.items[0].login != null);
     try std.testing.expectEqualStrings("dev@example.com", loaded.vault.items[0].login.?.username.?);
+}
+
+test "projectRuntimeVaultToV2 maps runtime items to login entries" {
+    const allocator = std.testing.allocator;
+
+    var runtime = try makeSampleVault(allocator);
+    defer model.freeVault(allocator, &runtime);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const v2 = try projectRuntimeVaultToV2(arena.allocator(), runtime);
+
+    try std.testing.expectEqual(@as(usize, 1), v2.folders.len);
+    try std.testing.expectEqual(@as(usize, 1), v2.items.len);
+    try std.testing.expectEqual(@as(u8, 1), v2.items[0].type);
+    try std.testing.expect(v2.items[0].login != null);
+    try std.testing.expectEqualStrings("dev@example.com", v2.items[0].login.?.username.?);
+}
+
+test "projectVaultV2ToRuntime preserves collection-linked item references" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{
+        \\  "version":2,
+        \\  "folders":[{"id":"f1","name":"Personal"}],
+        \\  "collections":[{"id":"c1","organizationId":"org-1","name":"Team"}],
+        \\  "items":[
+        \\    {"id":"i1","type":1,"name":"n","login":{"username":"u","password":"p"},"folderId":"f1"},
+        \\    {"id":"i2","type":2,"name":"note","secureNote":{"type":0},"organizationId":"org-1","collectionIds":["c1"]}
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try std.json.parseFromSlice(schema.VaultV2, allocator, json, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    var runtime = try projectVaultV2ToRuntime(allocator, parsed.value);
+    defer model.freeVault(allocator, &runtime);
+
+    try std.testing.expectEqual(@as(usize, 2), runtime.items.len);
+    try std.testing.expectEqual(@as(usize, 2), runtime.categories.len);
+    try std.testing.expect(runtime.items[0].category_id != null);
+    try std.testing.expect(runtime.items[1].category_id != null);
 }
 
 test "saveVault stores v2 payload format" {

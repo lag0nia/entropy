@@ -2,6 +2,7 @@ const std = @import("std");
 const model = @import("model.zig");
 const crypto = @import("crypto.zig");
 const storage = @import("storage.zig");
+const schema = @import("schema_v2.zig");
 const utils = @import("utils.zig");
 const tui = @import("tui.zig");
 const import_bitwarden = @import("import_bitwarden.zig");
@@ -94,19 +95,27 @@ pub fn main() !void {
         try w.print("\n{s}{s} Unlocking vault...{s}\n", .{ Color.yellow, utils.Icon.shield, Color.reset });
         try w.flush();
 
-        const loaded = storage.loadVault(allocator, password, vault_path) catch {
+        var loaded_v2 = storage.loadVaultV2(allocator, password, vault_path) catch {
             try w.print("{s}{s} Wrong password or corrupted vault.{s}\n", .{
                 Color.red, utils.Icon.cross_mark, Color.reset,
             });
             try w.flush();
             return;
         };
-        defer crypto.zeroize(@constCast(&loaded.key));
+        defer loaded_v2.deinit();
+
+        const runtime_vault = storage.projectVaultV2ToRuntime(allocator, loaded_v2.vault) catch {
+            try w.print("{s}{s} Vault payload could not be projected to runtime view.{s}\n", .{
+                Color.red, utils.Icon.cross_mark, Color.reset,
+            });
+            try w.flush();
+            return;
+        };
 
         session = .{
-            .vault = loaded.vault,
-            .key = loaded.key,
-            .salt = loaded.salt,
+            .vault = runtime_vault,
+            .key = loaded_v2.key,
+            .salt = loaded_v2.salt,
             .vault_path = vault_path,
         };
     } else {
@@ -157,19 +166,22 @@ pub fn main() !void {
         };
         defer crypto.zeroize(@constCast(&key));
 
-        // Create empty vault
-        const empty_items = try allocator.alloc(model.Item, 0);
-        const empty_categories = try allocator.alloc(model.Category, 0);
-
-        const vault = model.Vault{
-            .version = 1,
-            .items = empty_items,
-            .categories = empty_categories,
+        const empty_v2: schema.VaultV2 = .{
+            .version = 2,
+            .encrypted = false,
+            .source = .unknown,
+            .folders = &.{},
+            .collections = &.{},
+            .items = &.{},
         };
 
-        // Save vault
-        storage.saveVault(allocator, vault, &key, &salt, vault_path) catch {
+        storage.saveVaultV2(allocator, empty_v2, &key, &salt, vault_path) catch {
             std.debug.print("Error saving vault.\n", .{});
+            return;
+        };
+
+        const vault = storage.projectVaultV2ToRuntime(allocator, empty_v2) catch {
+            std.debug.print("Error building runtime projection.\n", .{});
             return;
         };
 
