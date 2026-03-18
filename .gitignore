@@ -16,3 +16,5 @@ tmp-data/
 
 .agents/
 skills-lock.json
+# Local planning docs
+plans/
