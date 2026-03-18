@@ -134,6 +134,7 @@ const TuiState = struct {
     form_is_category: bool = false,
     item_form_type: schema.ItemType = .login,
     form_container_kind: ContainerKind = .folder,
+    form_folder_pick_index: ?usize = null,
 
     // Delete confirm
     delete_target_name: []const u8 = "",
@@ -686,10 +687,36 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
         }
     }
 
+    if (folderFieldIsActive(state)) {
+        const folders = state.session.vault_v2.folders;
+        if (folders.len > 0) {
+            const folder_field_idx = folderFieldIndexForType(state.item_form_type);
+            const current_name = state.form_fields[folder_field_idx].slice();
+            try w.writeAll("\n");
+            try w.print("  {s}Available folders (Up/Down to select):{s}\n", .{
+                Color.dim, Color.reset,
+            });
+            for (folders, 0..) |folder, idx| {
+                const is_marked = if (state.form_folder_pick_index) |picked|
+                    picked == idx
+                else
+                    std.mem.eql(u8, current_name, folder.name);
+                if (is_marked) {
+                    try w.print("    {s}> {s}{s}{s}\n", .{
+                        Color.cyan, Color.bold, folder.name, Color.reset,
+                    });
+                } else {
+                    try w.print("      {s}\n", .{folder.name});
+                }
+            }
+        }
+    }
+
     try w.writeAll("\n");
     if (!state.form_is_category) {
         if (state.item_form_type == .login) {
-            try w.print("  {s}Tab{s}{s} next field  {s}Ctrl+G{s}{s} generate password  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+            try w.print("  {s}Tab{s}{s} next field  {s}Up/Down{s}{s} folder  {s}Ctrl+G{s}{s} generate password  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+                Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
@@ -697,7 +724,8 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
                 Color.reset,
             });
         } else {
-            try w.print("  {s}Tab{s}{s} next field  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+            try w.print("  {s}Tab{s}{s} next field  {s}Up/Down{s}{s} folder  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+                Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
@@ -747,6 +775,7 @@ fn drawHelp(w: *Writer, state: *const TuiState) !void {
 
     try w.print("\n  {s}Item/category forms{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    Tab next field, Enter save, Esc cancel\n");
+    try w.writeAll("    In Folder field: Up/Down lists and selects existing folders\n");
     try w.writeAll("    Ctrl+G generate password (login form)\n");
     try w.writeAll("    In containers: n folder, o collection\n");
 
@@ -840,6 +869,7 @@ fn initItemFormForType(state: *TuiState, item_type: schema.ItemType) void {
     state.form_is_category = false;
     state.form_active_field = 0;
     state.item_form_type = item_type;
+    state.form_folder_pick_index = null;
 
     switch (item_type) {
         .login => {
@@ -890,6 +920,62 @@ fn initItemFormForType(state: *TuiState, item_type: schema.ItemType) void {
             state.form_fields[8] = .{ .label = "Org ID:" };
         },
     }
+    syncFolderPickerFromCurrentField(state);
+}
+
+fn folderFieldIndexForType(item_type: schema.ItemType) usize {
+    return switch (item_type) {
+        .login => 6,
+        .secure_note => 3,
+        .card => 8,
+        .identity => 6,
+    };
+}
+
+fn folderFieldIsActive(state: *const TuiState) bool {
+    if (state.form_is_category) return false;
+    return state.form_active_field == folderFieldIndexForType(state.item_form_type);
+}
+
+fn syncFolderPickerFromCurrentField(state: *TuiState) void {
+    const field_index = folderFieldIndexForType(state.item_form_type);
+    const current_name = state.form_fields[field_index].slice();
+    state.form_folder_pick_index = null;
+    for (state.session.vault_v2.folders, 0..) |folder, idx| {
+        if (std.mem.eql(u8, folder.name, current_name)) {
+            state.form_folder_pick_index = idx;
+            break;
+        }
+    }
+}
+
+fn moveFolderPicker(state: *TuiState, direction: i8) void {
+    const folders = state.session.vault_v2.folders;
+    if (folders.len == 0) {
+        state.setMessage("No folders available", true);
+        return;
+    }
+
+    if (state.form_folder_pick_index == null) {
+        syncFolderPickerFromCurrentField(state);
+    }
+
+    var idx: usize = undefined;
+    if (state.form_folder_pick_index) |current| {
+        idx = if (direction >= 0)
+            (current + 1) % folders.len
+        else if (current == 0)
+            folders.len - 1
+        else
+            current - 1;
+    } else {
+        idx = if (direction >= 0) 0 else folders.len - 1;
+    }
+    state.form_folder_pick_index = idx;
+
+    const field_index = folderFieldIndexForType(state.item_form_type);
+    state.form_fields[field_index].clear();
+    state.form_fields[field_index].setFromSlice(folders[idx].name);
 }
 
 fn saveItemForm(state: *TuiState) !void {
@@ -1744,13 +1830,29 @@ fn handleForm(state: *TuiState, ev: KeyEvent, is_category: bool) !void {
         .tab => {
             state.form_active_field = (state.form_active_field + 1) % state.form_field_count;
         },
+        .up => {
+            if (!is_category and folderFieldIsActive(state)) {
+                moveFolderPicker(state, -1);
+            }
+        },
+        .down => {
+            if (!is_category and folderFieldIsActive(state)) {
+                moveFolderPicker(state, 1);
+            }
+        },
         .backspace => {
+            if (!is_category and folderFieldIsActive(state)) {
+                state.form_folder_pick_index = null;
+            }
             state.form_fields[state.form_active_field].deleteChar();
         },
         .char => |_| {
             if (!is_category and ev.char == 7 and state.item_form_type == .login) {
                 try generatePasswordInForm(state);
                 return;
+            }
+            if (!is_category and folderFieldIsActive(state)) {
+                state.form_folder_pick_index = null;
             }
             state.form_fields[state.form_active_field].appendChar(ev.char);
         },
