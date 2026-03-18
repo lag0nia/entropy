@@ -95,14 +95,13 @@ pub fn main() !void {
         try w.print("\n{s}{s} Unlocking vault...{s}\n", .{ Color.yellow, utils.Icon.shield, Color.reset });
         try w.flush();
 
-        var loaded_v2 = storage.loadVaultV2(allocator, password, vault_path) catch {
+        const loaded_v2 = storage.loadVaultV2(allocator, password, vault_path) catch {
             try w.print("{s}{s} Wrong password or corrupted vault.{s}\n", .{
                 Color.red, utils.Icon.cross_mark, Color.reset,
             });
             try w.flush();
             return;
         };
-        defer loaded_v2.deinit();
 
         const runtime_vault = storage.projectVaultV2ToRuntime(allocator, loaded_v2.vault) catch {
             try w.print("{s}{s} Vault payload could not be projected to runtime view.{s}\n", .{
@@ -114,6 +113,9 @@ pub fn main() !void {
 
         session = .{
             .vault = runtime_vault,
+            .vault_v2 = loaded_v2.vault,
+            .vault_v2_arena = loaded_v2.arena,
+            .vault_v2_allocator = loaded_v2.arena.allocator(),
             .key = loaded_v2.key,
             .salt = loaded_v2.salt,
             .vault_path = vault_path,
@@ -166,13 +168,15 @@ pub fn main() !void {
         };
         defer crypto.zeroize(@constCast(&key));
 
+        var v2_arena = std.heap.ArenaAllocator.init(allocator);
+        const v2a = v2_arena.allocator();
         const empty_v2: schema.VaultV2 = .{
             .version = 2,
             .encrypted = false,
             .source = .unknown,
-            .folders = &.{},
-            .collections = &.{},
-            .items = &.{},
+            .folders = try v2a.alloc(schema.Folder, 0),
+            .collections = try v2a.alloc(schema.Collection, 0),
+            .items = try v2a.alloc(schema.Item, 0),
         };
 
         storage.saveVaultV2(allocator, empty_v2, &key, &salt, vault_path) catch {
@@ -192,13 +196,15 @@ pub fn main() !void {
 
         session = .{
             .vault = vault,
+            .vault_v2 = empty_v2,
+            .vault_v2_arena = v2_arena,
+            .vault_v2_allocator = v2a,
             .key = key,
             .salt = salt,
             .vault_path = vault_path,
         };
     }
-    defer model.freeVault(allocator, &session.vault);
-    defer crypto.zeroize(&session.key);
+    defer session.deinit(allocator);
 
     if (import_cmd) |cmd| {
         try w.print("{s}{s} Running Bitwarden import...{s}\n", .{

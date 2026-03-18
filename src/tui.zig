@@ -5,6 +5,7 @@ const crypto = @import("crypto.zig");
 const storage = @import("storage.zig");
 const bip39 = @import("bip39.zig");
 const vault_service = @import("vault_service.zig");
+const schema = @import("schema_v2.zig");
 
 pub const Color = utils.Color;
 pub const Box = utils.Box;
@@ -86,10 +87,19 @@ const InputField = struct {
 
 pub const VaultSession = struct {
     vault: model.Vault,
+    vault_v2: schema.VaultV2,
+    vault_v2_arena: std.heap.ArenaAllocator,
+    vault_v2_allocator: std.mem.Allocator,
     key: [crypto.KEY_LEN]u8,
     salt: [crypto.SALT_LEN]u8,
     vault_path: []const u8,
     dirty: bool = false,
+
+    pub fn deinit(self: *VaultSession, allocator: std.mem.Allocator) void {
+        model.freeVault(allocator, &self.vault);
+        self.vault_v2_arena.deinit();
+        crypto.zeroize(&self.key);
+    }
 };
 
 const TuiState = struct {
