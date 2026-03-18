@@ -5,6 +5,7 @@ const crypto = @import("crypto.zig");
 const storage = @import("storage.zig");
 const bip39 = @import("bip39.zig");
 const vault_service = @import("vault_service.zig");
+const vault_service_v2 = @import("vault_service_v2.zig");
 const schema = @import("schema_v2.zig");
 
 pub const Color = utils.Color;
@@ -656,10 +657,10 @@ fn initItemForm(state: *TuiState) void {
     state.form_field_count = 5;
     state.form_active_field = 0;
     state.form_fields[0] = .{ .label = "Name:" };
-    state.form_fields[1] = .{ .label = "Mail:" };
+    state.form_fields[1] = .{ .label = "User:" };
     state.form_fields[2] = .{ .label = "Password:" };
     state.form_fields[3] = .{ .label = "Notes:" };
-    state.form_fields[4] = .{ .label = "Category:" };
+    state.form_fields[4] = .{ .label = "Folder:" };
 }
 
 fn initCategoryForm(state: *TuiState) void {
@@ -670,48 +671,63 @@ fn initCategoryForm(state: *TuiState) void {
 }
 
 fn saveItemForm(state: *TuiState) !void {
-    const input = vault_service.ItemFormInput{
-        .name = state.form_fields[0].slice(),
-        .mail = state.form_fields[1].slice(),
-        .password = state.form_fields[2].slice(),
-        .notes = state.form_fields[3].slice(),
-        .category_name = state.form_fields[4].slice(),
+    const name = state.form_fields[0].slice();
+    const user = state.form_fields[1].slice();
+    const password_input = state.form_fields[2].slice();
+    const notes = state.form_fields[3].slice();
+    const folder_name = state.form_fields[4].slice();
+    const folder_id = resolveFolderIdByName(state, folder_name) catch {
+        state.setMessage("Folder not found", true);
+        return;
     };
 
     if (state.form_editing_index) |idx| {
-        vault_service.updateItem(
-            state.allocator,
-            &state.session.vault,
-            idx,
-            input,
-        ) catch |err| {
-            switch (err) {
-                error.NameOrMailRequired => state.setMessage("Name or mail is required", true),
-                error.CategoryNotFound => state.setMessage("Category not found", true),
-                error.ItemIndexOutOfRange => state.setMessage("Invalid item selection", true),
-                else => return err,
-            }
+        if (idx >= state.session.vault_v2.items.len) {
+            state.setMessage("Invalid item selection", true);
             return;
-        };
+        }
+        try updateV2ItemFromForm(state, idx, name, user, password_input, notes, folder_id, folder_name.len > 0);
         state.setMessage("Item updated", false);
     } else {
-        vault_service.createItem(
-            state.allocator,
-            &state.session.vault,
-            input,
-            state.wordlist,
-        ) catch |err| {
-            switch (err) {
-                error.NameOrMailRequired => state.setMessage("Name or mail is required", true),
-                error.CategoryNotFound => state.setMessage("Category not found", true),
-                error.NoWordlistLoaded => state.setMessage("No wordlist loaded for generation", true),
-                else => return err,
-            }
+        if (name.len == 0 and user.len == 0) {
+            state.setMessage("Name or user is required", true);
+            return;
+        }
+
+        var generated_pw: ?[]u8 = null;
+        defer if (generated_pw) |pw| state.allocator.free(pw);
+        const password = if (password_input.len > 0)
+            password_input
+        else blk: {
+            const wl = state.wordlist orelse {
+                state.setMessage("No wordlist loaded for generation", true);
+                return;
+            };
+            const pw = try bip39.generateMnemonic(state.allocator, wl, "-");
+            generated_pw = pw;
+            break :blk pw;
+        };
+
+        const display_name = if (name.len > 0) name else user;
+        _ = vault_service_v2.createItem(
+            state.session.vault_v2_allocator,
+            &state.session.vault_v2,
+            .{
+                .type = .login,
+                .name = display_name,
+                .notes = notes,
+                .folder_id = folder_id,
+                .login_username = if (user.len > 0) user else null,
+                .login_password = password,
+            },
+        ) catch {
+            state.setMessage("Failed to create item", true);
             return;
         };
         state.setMessage("Item created", false);
     }
 
+    try rebuildRuntimeFromV2(state);
     state.session.dirty = true;
     try persistVault(state);
     state.screen = .item_list;
@@ -758,20 +774,124 @@ fn saveCategoryForm(state: *TuiState) !void {
     state.selected = 0;
 }
 
-fn deleteSelectedItem(state: *TuiState) !void {
-    vault_service.deleteItem(
-        state.allocator,
-        &state.session.vault,
-        state.selected,
-    ) catch |err| {
-        switch (err) {
-            error.ItemIndexOutOfRange => state.setMessage("Invalid item selection", true),
-            else => return err,
+fn resolveFolderIdByName(state: *const TuiState, folder_name: []const u8) !?[]const u8 {
+    if (folder_name.len == 0) return null;
+    for (state.session.vault_v2.folders) |folder| {
+        if (std.mem.eql(u8, folder.name, folder_name)) {
+            return folder.id;
         }
+    }
+    return error.FolderNotFound;
+}
+
+fn updateV2ItemFromForm(
+    state: *TuiState,
+    item_index: usize,
+    name: []const u8,
+    user: []const u8,
+    password: []const u8,
+    notes: []const u8,
+    folder_id: ?[]const u8,
+    folder_override: bool,
+) !void {
+    const allocator = state.session.vault_v2_allocator;
+    var item = &state.session.vault_v2.items[item_index];
+
+    const next_name = if (name.len > 0)
+        name
+    else if (user.len > 0)
+        user
+    else
+        item.name;
+    const new_name = try allocator.dupe(u8, next_name);
+    allocator.free(item.name);
+    item.name = new_name;
+
+    if (item.notes) |v| allocator.free(v);
+    item.notes = if (notes.len > 0) try allocator.dupe(u8, notes) else null;
+
+    if (folder_override) {
+        if (item.folderId) |v| allocator.free(v);
+        item.folderId = if (folder_id) |id| try allocator.dupe(u8, id) else null;
+    }
+
+    switch (item.type) {
+        1 => {
+            if (item.login == null) item.login = .{};
+            if (item.login.?.username) |v| allocator.free(v);
+            item.login.?.username = if (user.len > 0) try allocator.dupe(u8, user) else null;
+            if (password.len > 0) {
+                if (item.login.?.password) |v| allocator.free(v);
+                item.login.?.password = try allocator.dupe(u8, password);
+            }
+        },
+        3 => {
+            if (item.card == null) item.card = .{};
+            if (password.len > 0) {
+                if (item.card.?.number) |v| allocator.free(v);
+                item.card.?.number = try allocator.dupe(u8, password);
+            }
+        },
+        4 => {
+            if (item.identity == null) item.identity = .{};
+            if (item.identity.?.email) |v| allocator.free(v);
+            item.identity.?.email = if (user.len > 0) try allocator.dupe(u8, user) else null;
+        },
+        else => {},
+    }
+
+    var now_buf: [20]u8 = undefined;
+    if (item.revisionDate) |v| allocator.free(v);
+    item.revisionDate = try allocator.dupe(u8, model.nowTimestamp(&now_buf));
+}
+
+fn rebuildRuntimeFromV2(state: *TuiState) !void {
+    model.freeVault(state.allocator, &state.session.vault);
+    state.session.vault = try storage.projectVaultV2ToRuntime(
+        state.allocator,
+        state.session.vault_v2,
+    );
+}
+
+fn prefillItemFormFromV2(state: *TuiState, item: schema.Item) void {
+    state.form_fields[0].setFromSlice(item.name);
+    if (itemPrimaryIdentifier(item)) |id_text| {
+        state.form_fields[1].setFromSlice(id_text);
+    }
+    const secret = itemPrimarySecret(item);
+    if (secret.len > 0) {
+        state.form_fields[2].setFromSlice(secret);
+    }
+    if (item.notes) |notes| {
+        state.form_fields[3].setFromSlice(notes);
+    }
+    if (item.folderId) |folder_id| {
+        for (state.session.vault_v2.folders) |folder| {
+            if (std.mem.eql(u8, folder.id, folder_id)) {
+                state.form_fields[4].setFromSlice(folder.name);
+                break;
+            }
+        }
+    }
+}
+
+fn deleteSelectedItem(state: *TuiState) !void {
+    if (state.selected >= state.session.vault_v2.items.len) {
+        state.setMessage("Invalid item selection", true);
+        return;
+    }
+    const item_id = state.session.vault_v2.items[state.selected].id;
+    vault_service_v2.deleteItem(
+        state.session.vault_v2_allocator,
+        &state.session.vault_v2,
+        item_id,
+    ) catch {
+        state.setMessage("Failed to delete item", true);
         return;
     };
 
     if (state.selected > 0) state.selected -= 1;
+    try rebuildRuntimeFromV2(state);
     state.session.dirty = true;
     try persistVault(state);
     state.setMessage("Item deleted", false);
@@ -871,22 +991,10 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
             },
             'e' => {
                 if (count > 0) {
-                    const item = state.session.vault.items[state.selected];
+                    const item = state.session.vault_v2.items[state.selected];
                     initItemForm(state);
                     state.form_editing_index = state.selected;
-                    if (item.name) |n| state.form_fields[0].setFromSlice(n);
-                    if (item.mail) |m| state.form_fields[1].setFromSlice(m);
-                    state.form_fields[2].setFromSlice(item.password);
-                    if (item.notes) |nt| state.form_fields[3].setFromSlice(nt);
-                    // Resolve category name
-                    if (item.category_id) |cid| {
-                        for (state.session.vault.categories) |cat| {
-                            if (std.mem.eql(u8, cat.id, cid)) {
-                                state.form_fields[4].setFromSlice(cat.name);
-                                break;
-                            }
-                        }
-                    }
+                    prefillItemFormFromV2(state, item);
                     state.screen = .item_form;
                 }
             },
@@ -918,21 +1026,10 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
         .escape => state.screen = .item_list,
         .char => switch (ev.char) {
             'e' => {
-                const item = state.session.vault.items[state.selected];
+                const item = state.session.vault_v2.items[state.selected];
                 initItemForm(state);
                 state.form_editing_index = state.selected;
-                if (item.name) |n| state.form_fields[0].setFromSlice(n);
-                if (item.mail) |m| state.form_fields[1].setFromSlice(m);
-                state.form_fields[2].setFromSlice(item.password);
-                if (item.notes) |nt| state.form_fields[3].setFromSlice(nt);
-                if (item.category_id) |cid| {
-                    for (state.session.vault.categories) |cat| {
-                        if (std.mem.eql(u8, cat.id, cid)) {
-                            state.form_fields[4].setFromSlice(cat.name);
-                            break;
-                        }
-                    }
-                }
+                prefillItemFormFromV2(state, item);
                 state.screen = .item_form;
             },
             'd' => {
