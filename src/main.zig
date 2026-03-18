@@ -95,7 +95,7 @@ pub fn main() !void {
         try w.print("\n{s}{s} Unlocking vault...{s}\n", .{ Color.yellow, utils.Icon.shield, Color.reset });
         try w.flush();
 
-        const loaded_v2 = storage.loadVaultV2(allocator, password, vault_path) catch {
+        var loaded_v2 = storage.loadVaultV2(allocator, password, vault_path) catch {
             try w.print("{s}{s} Wrong password or corrupted vault.{s}\n", .{
                 Color.red, utils.Icon.cross_mark, Color.reset,
             });

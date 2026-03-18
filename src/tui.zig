@@ -893,7 +893,7 @@ fn initItemFormForType(state: *TuiState, item_type: schema.ItemType) void {
 }
 
 fn saveItemForm(state: *TuiState) !void {
-    var generated_pw: ?[]u8 = null;
+    var generated_pw: ?[]const u8 = null;
     defer if (generated_pw) |pw| state.allocator.free(pw);
 
     var collection_ids: []const []const u8 = &.{};
@@ -1332,7 +1332,6 @@ fn updateV2ItemFromForm(
                 item.identity.?.phone = try allocator.dupe(u8, phone);
             }
         },
-        else => {},
     }
 
     var now_buf: [20]u8 = undefined;
