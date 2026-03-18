@@ -135,6 +135,7 @@ const TuiState = struct {
     running: bool = true,
     message: ?[]const u8 = null,
     message_is_error: bool = false,
+    message_expires_at_ns: ?i128 = null,
 
     // Form state
     form_fields: [12]InputField = undefined,
@@ -173,10 +174,27 @@ const TuiState = struct {
     fn setMessage(self: *TuiState, msg: []const u8, is_error: bool) void {
         self.message = msg;
         self.message_is_error = is_error;
+        self.message_expires_at_ns = null;
+    }
+
+    fn setTimedMessage(self: *TuiState, msg: []const u8, is_error: bool, timeout_ms: u64) void {
+        self.message = msg;
+        self.message_is_error = is_error;
+        const now = std.time.nanoTimestamp();
+        self.message_expires_at_ns = now + @as(i128, @intCast(timeout_ms)) * @as(i128, std.time.ns_per_ms);
     }
 
     fn clearMessage(self: *TuiState) void {
         self.message = null;
+        self.message_expires_at_ns = null;
+    }
+
+    fn expireMessageIfNeeded(self: *TuiState) void {
+        if (self.message_expires_at_ns) |deadline| {
+            if (std.time.nanoTimestamp() >= deadline) {
+                self.clearMessage();
+            }
+        }
     }
 
     fn visibleItems(self: *const TuiState) usize {
@@ -1761,7 +1779,7 @@ fn refreshSessionV2FromDisk(state: *TuiState) !void {
 // ─── Input handling ─────────────────────────────────────────────────────────
 
 fn handleInput(state: *TuiState, ev: KeyEvent) !void {
-    state.clearMessage();
+    state.expireMessageIfNeeded();
 
     switch (state.screen) {
         .item_list => try handleItemList(state, ev),
@@ -1873,15 +1891,15 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
             switch (action) {
                 .reveal => {
                     const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
-                    state.setMessage(pw, false);
+                    state.setTimedMessage(pw, false, 3000);
                 },
                 .copy => {
                     const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
                     const copied = utils.copyToClipboard(state.allocator, pw) catch false;
                     if (copied) {
-                        state.setMessage("Password copied to clipboard", false);
+                        state.setTimedMessage("Password copied to clipboard", false, 3000);
                     } else {
-                        state.setMessage("Clipboard unavailable (pbcopy/wl-copy/xclip)", true);
+                        state.setTimedMessage("Clipboard unavailable (pbcopy/wl-copy/xclip)", true, 3000);
                     }
                 },
                 .none => {},
@@ -1910,15 +1928,15 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
             'p' => {
                 // Toggle reveal password (just show it as a message for now)
                 const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
-                state.setMessage(pw, false);
+                state.setTimedMessage(pw, false, 3000);
             },
             'y' => {
                 const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
                 const copied = utils.copyToClipboard(state.allocator, pw) catch false;
                 if (copied) {
-                    state.setMessage("Password copied to clipboard", false);
+                    state.setTimedMessage("Password copied to clipboard", false, 3000);
                 } else {
-                    state.setMessage("Clipboard unavailable (pbcopy/wl-copy/xclip)", true);
+                    state.setTimedMessage("Clipboard unavailable (pbcopy/wl-copy/xclip)", true, 3000);
                 }
             },
             '?' => {
@@ -2192,6 +2210,7 @@ pub fn run(allocator: std.mem.Allocator, session: *VaultSession) !void {
     // Main loop
     while (state.running) {
         state.refreshSize();
+        state.expireMessageIfNeeded();
         try render(w, &state);
 
         if (readKey(raw.fd)) |ev| {
