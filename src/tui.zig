@@ -4,7 +4,6 @@ const model = @import("model.zig");
 const crypto = @import("crypto.zig");
 const storage = @import("storage.zig");
 const bip39 = @import("bip39.zig");
-const vault_service = @import("vault_service.zig");
 const vault_service_v2 = @import("vault_service_v2.zig");
 const schema = @import("schema_v2.zig");
 
@@ -45,6 +44,16 @@ const Screen = enum {
     category_form,
     confirm_delete,
     help,
+};
+
+const ContainerKind = enum {
+    folder,
+    collection,
+};
+
+const ContainerSelection = struct {
+    kind: ContainerKind,
+    index: usize,
 };
 
 // ─── Input buffer for forms ─────────────────────────────────────────────────
@@ -123,6 +132,7 @@ const TuiState = struct {
     form_editing_index: ?usize = null, // null = creating new
     form_is_category: bool = false,
     item_form_type: schema.ItemType = .login,
+    form_container_kind: ContainerKind = .folder,
 
     // Delete confirm
     delete_target_name: []const u8 = "",
@@ -162,7 +172,7 @@ const TuiState = struct {
 
     fn itemCount(self: *const TuiState) usize {
         if (self.screen == .category_list) {
-            return self.session.vault.categories.len;
+            return self.session.vault_v2.folders.len + self.session.vault_v2.collections.len;
         }
         return self.session.vault_v2.items.len;
     }
@@ -437,10 +447,12 @@ fn resolveContainerLabel(state: *const TuiState, item: schema.Item) ?[]const u8 
 }
 
 fn drawCategoryList(w: *Writer, state: *TuiState) !void {
-    const categories = state.session.vault.categories;
+    const folders = state.session.vault_v2.folders;
+    const collections = state.session.vault_v2.collections;
+    const total = folders.len + collections.len;
 
     try w.writeAll("\n");
-    try w.print("  {s}{s}Categories{s}\n", .{ Color.bold, Color.bright_white, Color.reset });
+    try w.print("  {s}{s}Containers{s}\n", .{ Color.bold, Color.bright_white, Color.reset });
     try w.print("  {s}", .{Color.bright_black});
     var sep_i: usize = 0;
     while (sep_i < @min(state.cols -| 4, 50)) : (sep_i += 1) {
@@ -448,14 +460,15 @@ fn drawCategoryList(w: *Writer, state: *TuiState) !void {
     }
     try w.print("{s}\n\n", .{Color.reset});
 
-    if (categories.len == 0) {
-        try w.print("  {s}No categories yet. Press {s}n{s}{s} to create one.{s}\n\n", .{
-            Color.dim, Color.bold, Color.reset, Color.dim, Color.reset,
+    if (total == 0) {
+        try w.print("  {s}No containers yet. Press {s}n{s}{s} for folder or {s}o{s}{s} for collection.{s}\n\n", .{
+            Color.dim, Color.bold, Color.reset, Color.dim,
+            Color.bold, Color.reset, Color.dim, Color.reset,
         });
         return;
     }
 
-    for (categories, 0..) |cat, i| {
+    for (folders, 0..) |folder, i| {
         const is_selected = (i == state.selected);
         if (is_selected) {
             try w.print("  {s}{s}{s}{s} ", .{ Color.cyan, Color.bold, Icon.arrow_right, Color.reset });
@@ -464,34 +477,190 @@ fn drawCategoryList(w: *Writer, state: *TuiState) !void {
         }
 
         if (is_selected) {
-            try w.print("{s}{s}{s}{s}", .{ Color.bold, Color.bright_white, cat.name, Color.reset });
+            try w.print("{s}{s}[folder]{s} {s}{s}{s}", .{
+                Color.dim, Color.yellow, Color.reset,
+                Color.bold, folder.name, Color.reset,
+            });
         } else {
-            try w.print("{s}", .{cat.name});
+            try w.print("{s}[folder]{s} {s}", .{
+                Color.dim, Color.reset, folder.name,
+            });
         }
 
-        // Count items in this category
         var count: usize = 0;
-        for (state.session.vault.items) |item| {
-            if (item.category_id) |cid| {
-                if (std.mem.eql(u8, cid, cat.id)) count += 1;
+        for (state.session.vault_v2.items) |item| {
+            if (item.folderId) |folder_id| {
+                if (std.mem.eql(u8, folder.id, folder_id)) count += 1;
             }
+        }
+        try w.print("  {s}({d} items){s}\n", .{ Color.dim, count, Color.reset });
+    }
+
+    for (collections, 0..) |collection, idx| {
+        const row_index = folders.len + idx;
+        const is_selected = (row_index == state.selected);
+        if (is_selected) {
+            try w.print("  {s}{s}{s}{s} ", .{ Color.cyan, Color.bold, Icon.arrow_right, Color.reset });
+        } else {
+            try w.writeAll("    ");
         }
 
         if (is_selected) {
-            try w.print("  {s}({d} items){s}", .{ Color.dim, count, Color.reset });
+            try w.print("{s}{s}[collection]{s} {s}{s}{s}", .{
+                Color.dim, Color.yellow, Color.reset,
+                Color.bold, collection.name, Color.reset,
+            });
         } else {
-            try w.print("  {s}({d} items){s}", .{ Color.dim, count, Color.reset });
+            try w.print("{s}[collection]{s} {s}", .{
+                Color.dim, Color.reset, collection.name,
+            });
         }
-        try w.writeAll("\n");
+
+        var count: usize = 0;
+        for (state.session.vault_v2.items) |item| {
+            if (item.collectionIds) |collection_ids| {
+                var matched = false;
+                for (collection_ids) |maybe_id| {
+                    const id = maybe_id orelse continue;
+                    if (std.mem.eql(u8, collection.id, id)) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (matched) count += 1;
+            }
+        }
+        try w.print("  {s}({d} items){s}\n", .{ Color.dim, count, Color.reset });
     }
+
     try w.writeAll("\n");
+}
+
+fn selectedContainer(state: *const TuiState) ?ContainerSelection {
+    const folders_len = state.session.vault_v2.folders.len;
+    if (state.selected < folders_len) {
+        return .{ .kind = .folder, .index = state.selected };
+    }
+    const collection_index = state.selected - folders_len;
+    if (collection_index < state.session.vault_v2.collections.len) {
+        return .{ .kind = .collection, .index = collection_index };
+    }
+    return null;
+}
+
+fn containerDisplayName(state: *const TuiState, sel: ContainerSelection) []const u8 {
+    return switch (sel.kind) {
+        .folder => state.session.vault_v2.folders[sel.index].name,
+        .collection => state.session.vault_v2.collections[sel.index].name,
+    };
+}
+
+fn containerKindLabel(kind: ContainerKind) []const u8 {
+    return switch (kind) {
+        .folder => "folder",
+        .collection => "collection",
+    };
+}
+
+fn initContainerForm(state: *TuiState, kind: ContainerKind) void {
+    state.form_is_category = true;
+    state.form_container_kind = kind;
+    state.form_active_field = 0;
+
+    switch (kind) {
+        .folder => {
+            state.form_field_count = 1;
+            state.form_fields[0] = .{ .label = "Name:" };
+        },
+        .collection => {
+            state.form_field_count = 2;
+            state.form_fields[0] = .{ .label = "Name:" };
+            state.form_fields[1] = .{ .label = "Org ID:" };
+        },
+    }
+}
+
+fn deleteCollectionLinksById(
+    allocator: std.mem.Allocator,
+    item: *schema.Item,
+    collection_id: []const u8,
+) !void {
+    const old = item.collectionIds orelse return;
+    var kept = std.ArrayList(?[]const u8){};
+    defer kept.deinit(allocator);
+
+    for (old) |maybe_id| {
+        const id = maybe_id orelse continue;
+        if (std.mem.eql(u8, id, collection_id)) {
+            allocator.free(id);
+        } else {
+            try kept.append(allocator, maybe_id);
+        }
+    }
+    allocator.free(old);
+    if (kept.items.len == 0) {
+        item.collectionIds = null;
+    } else {
+        item.collectionIds = try kept.toOwnedSlice(allocator);
+    }
+}
+
+fn removeContainerAtSelection(state: *TuiState, sel: ContainerSelection) !void {
+    const allocator = state.session.vault_v2_allocator;
+    switch (sel.kind) {
+        .folder => {
+            const old = state.session.vault_v2.folders;
+            const removed = old[sel.index];
+            var folders = std.ArrayList(schema.Folder){};
+            defer folders.deinit(allocator);
+            for (old, 0..) |folder, i| {
+                if (i != sel.index) try folders.append(allocator, folder);
+            }
+            state.session.vault_v2.folders = try folders.toOwnedSlice(allocator);
+            allocator.free(old);
+            for (state.session.vault_v2.items) |*item| {
+                if (item.folderId) |folder_id| {
+                    if (std.mem.eql(u8, folder_id, removed.id)) {
+                        allocator.free(folder_id);
+                        item.folderId = null;
+                    }
+                }
+            }
+            allocator.free(removed.id);
+            allocator.free(removed.name);
+        },
+        .collection => {
+            const old = state.session.vault_v2.collections;
+            const removed = old[sel.index];
+            var collections = std.ArrayList(schema.Collection){};
+            defer collections.deinit(allocator);
+            for (old, 0..) |collection, i| {
+                if (i != sel.index) try collections.append(allocator, collection);
+            }
+            state.session.vault_v2.collections = try collections.toOwnedSlice(allocator);
+            allocator.free(old);
+            for (state.session.vault_v2.items) |*item| {
+                try deleteCollectionLinksById(allocator, item, removed.id);
+            }
+            allocator.free(removed.id);
+            if (removed.organizationId) |org_id| allocator.free(org_id);
+            allocator.free(removed.name);
+            if (removed.externalId) |external_id| allocator.free(external_id);
+        },
+    }
 }
 
 fn drawForm(w: *Writer, state: *const TuiState) !void {
     const title = if (state.form_editing_index != null)
-        (if (state.form_is_category) "Edit Category" else "Edit Item")
+        (if (state.form_is_category)
+            (if (state.form_container_kind == .folder) "Edit Folder" else "Edit Collection")
+        else
+            "Edit Item")
     else
-        (if (state.form_is_category) "New Category" else "New Item");
+        (if (state.form_is_category)
+            (if (state.form_container_kind == .folder) "New Folder" else "New Collection")
+        else
+            "New Item");
     const item_type_hint: []const u8 = if (state.form_is_category) "" else itemTypeLabel(@intFromEnum(state.item_form_type));
 
     try w.writeAll("\n");
@@ -585,6 +754,7 @@ fn drawHelp(w: *Writer, state: *const TuiState) !void {
     try w.print("\n  {s}Item/category forms{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    Tab next field, Enter save, Esc cancel\n");
     try w.writeAll("    Ctrl+G generate password (login form)\n");
+    try w.writeAll("    In containers: n folder, o collection\n");
 
     try w.print("\n  {s}Global{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    ? open help, Esc or q close help\n\n");
@@ -628,7 +798,8 @@ fn drawFooter(w: *Writer, state: *const TuiState) !void {
             try drawKeyHint(w, "Esc", "back");
         },
         .category_list => {
-            try drawKeyHint(w, "n", "new");
+            try drawKeyHint(w, "n", "new folder");
+            try drawKeyHint(w, "o", "new collection");
             try drawKeyHint(w, "e", "edit");
             try drawKeyHint(w, "d", "delete");
             try drawKeyHint(w, "?", "help");
@@ -725,13 +896,6 @@ fn initItemFormForType(state: *TuiState, item_type: schema.ItemType) void {
             state.form_fields[8] = .{ .label = "Org ID:" };
         },
     }
-}
-
-fn initCategoryForm(state: *TuiState) void {
-    state.form_is_category = true;
-    state.form_field_count = 1;
-    state.form_active_field = 0;
-    state.form_fields[0] = .{ .label = "Name:" };
 }
 
 fn saveItemForm(state: *TuiState) !void {
@@ -937,43 +1101,76 @@ fn saveItemForm(state: *TuiState) !void {
 
 fn saveCategoryForm(state: *TuiState) !void {
     const name = state.form_fields[0].slice();
-
-    if (state.form_editing_index) |idx| {
-        vault_service.updateCategory(
-            state.allocator,
-            &state.session.vault,
-            idx,
-            name,
-        ) catch |err| {
-            switch (err) {
-                error.CategoryNameRequired => state.setMessage("Category name is required", true),
-                error.CategoryNameAlreadyExists => state.setMessage("Category already exists", true),
-                error.CategoryIndexOutOfRange => state.setMessage("Invalid category selection", true),
-                else => return err,
-            }
-            return;
-        };
-        state.setMessage("Category updated", false);
-    } else {
-        vault_service.createCategory(
-            state.allocator,
-            &state.session.vault,
-            name,
-        ) catch |err| {
-            switch (err) {
-                error.CategoryNameRequired => state.setMessage("Category name is required", true),
-                error.CategoryNameAlreadyExists => state.setMessage("Category already exists", true),
-                else => return err,
-            }
-            return;
-        };
-        state.setMessage("Category created", false);
+    if (name.len == 0) {
+        state.setMessage("Name is required", true);
+        return;
     }
 
+    const allocator = state.session.vault_v2_allocator;
+    if (state.form_editing_index != null) {
+        const sel = selectedContainer(state) orelse {
+            state.setMessage("Invalid category selection", true);
+            return;
+        };
+        switch (sel.kind) {
+            .folder => {
+                const folder = &state.session.vault_v2.folders[sel.index];
+                const new_name = try allocator.dupe(u8, name);
+                allocator.free(folder.name);
+                folder.name = new_name;
+                state.setMessage("Folder updated", false);
+            },
+            .collection => {
+                const collection = &state.session.vault_v2.collections[sel.index];
+                const org_id = state.form_fields[1].slice();
+
+                const new_name = try allocator.dupe(u8, name);
+                allocator.free(collection.name);
+                collection.name = new_name;
+
+                if (collection.organizationId) |old_org| allocator.free(old_org);
+                collection.organizationId = if (org_id.len > 0) try allocator.dupe(u8, org_id) else null;
+                state.setMessage("Collection updated", false);
+            },
+        }
+    } else {
+        switch (state.form_container_kind) {
+            .folder => {
+                _ = vault_service_v2.createFolder(
+                    allocator,
+                    &state.session.vault_v2,
+                    name,
+                ) catch {
+                    state.setMessage("Failed to create folder", true);
+                    return;
+                };
+                state.setMessage("Folder created", false);
+            },
+            .collection => {
+                const org_id = state.form_fields[1].slice();
+                if (org_id.len == 0) {
+                    state.setMessage("Org ID is required", true);
+                    return;
+                }
+                _ = vault_service_v2.createCollection(
+                    allocator,
+                    &state.session.vault_v2,
+                    org_id,
+                    name,
+                ) catch {
+                    state.setMessage("Failed to create collection", true);
+                    return;
+                };
+                state.setMessage("Collection created", false);
+            },
+        }
+    }
+
+    try rebuildRuntimeFromV2(state);
     state.session.dirty = true;
     try persistVault(state);
     state.screen = .category_list;
-    state.selected = 0;
+    if (state.selected >= state.itemCount() and state.selected > 0) state.selected -= 1;
 }
 
 fn resolveFolderIdByName(state: *const TuiState, folder_name: []const u8) !?[]const u8 {
@@ -1282,22 +1479,17 @@ fn deleteSelectedItem(state: *TuiState) !void {
 }
 
 fn deleteSelectedCategory(state: *TuiState) !void {
-    vault_service.deleteCategory(
-        state.allocator,
-        &state.session.vault,
-        state.selected,
-    ) catch |err| {
-        switch (err) {
-            error.CategoryIndexOutOfRange => state.setMessage("Invalid category selection", true),
-            else => return err,
-        }
+    const sel = selectedContainer(state) orelse {
+        state.setMessage("Invalid category selection", true);
         return;
     };
+    try removeContainerAtSelection(state, sel);
 
     if (state.selected > 0) state.selected -= 1;
+    try rebuildRuntimeFromV2(state);
     state.session.dirty = true;
     try persistVault(state);
-    state.setMessage("Category deleted", false);
+    state.setMessage("Container deleted", false);
     state.screen = .category_list;
 }
 
@@ -1465,7 +1657,7 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
 }
 
 fn handleCategoryList(state: *TuiState, ev: KeyEvent) !void {
-    const count = state.session.vault.categories.len;
+    const count = state.session.vault_v2.folders.len + state.session.vault_v2.collections.len;
     switch (ev.key) {
         .escape => {
             state.selected = 0;
@@ -1479,25 +1671,39 @@ fn handleCategoryList(state: *TuiState, ev: KeyEvent) !void {
         },
         .char => switch (ev.char) {
             'n' => {
-                initCategoryForm(state);
+                initContainerForm(state, .folder);
+                state.form_editing_index = null;
+                state.screen = .category_form;
+            },
+            'o' => {
+                initContainerForm(state, .collection);
                 state.form_editing_index = null;
                 state.screen = .category_form;
             },
             'e' => {
-                if (count > 0) {
-                    initCategoryForm(state);
-                    state.form_editing_index = state.selected;
-                    state.form_fields[0].setFromSlice(state.session.vault.categories[state.selected].name);
-                    state.screen = .category_form;
+                if (count == 0) return;
+                const sel = selectedContainer(state) orelse return;
+                initContainerForm(state, sel.kind);
+                state.form_editing_index = state.selected;
+                switch (sel.kind) {
+                    .folder => {
+                        state.form_fields[0].setFromSlice(state.session.vault_v2.folders[sel.index].name);
+                    },
+                    .collection => {
+                        const collection = state.session.vault_v2.collections[sel.index];
+                        state.form_fields[0].setFromSlice(collection.name);
+                        if (collection.organizationId) |org_id| state.form_fields[1].setFromSlice(org_id);
+                    },
                 }
+                state.screen = .category_form;
             },
             'd' => {
-                if (count > 0) {
-                    state.delete_target_name = state.session.vault.categories[state.selected].name;
-                    state.delete_is_category = true;
-                    state.prev_screen = .category_list;
-                    state.screen = .confirm_delete;
-                }
+                if (count == 0) return;
+                const sel = selectedContainer(state) orelse return;
+                state.delete_target_name = containerDisplayName(state, sel);
+                state.delete_is_category = true;
+                state.prev_screen = .category_list;
+                state.screen = .confirm_delete;
             },
             '?' => {
                 state.prev_screen = .category_list;
