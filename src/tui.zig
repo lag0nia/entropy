@@ -162,7 +162,7 @@ const TuiState = struct {
         if (self.screen == .category_list) {
             return self.session.vault.categories.len;
         }
-        return self.session.vault.items.len;
+        return self.session.vault_v2.items.len;
     }
 };
 
@@ -262,8 +262,7 @@ fn drawHeader(w: *Writer, state: *const TuiState) !void {
 }
 
 fn drawItemList(w: *Writer, state: *TuiState) !void {
-    const items = state.session.vault.items;
-    const categories = state.session.vault.categories;
+    const items = state.session.vault_v2.items;
 
     if (items.len == 0) {
         try w.writeAll("\n");
@@ -298,33 +297,28 @@ fn drawItemList(w: *Writer, state: *TuiState) !void {
             try w.writeAll("    ");
         }
 
-        try w.print("{s}[{s}]{s} ", .{ Color.dim, itemTypeLabel(item.item_type), Color.reset });
+        try w.print("{s}[{s}]{s} ", .{ Color.dim, itemTypeLabel(item.type), Color.reset });
 
         // Name
-        const name = item.name orelse "(unnamed)";
+        const name = if (item.name.len > 0) item.name else "(unnamed)";
         if (is_selected) {
             try w.print("{s}{s}{s}{s}", .{ Color.bold, Color.bright_white, name, Color.reset });
         } else {
             try w.print("{s}", .{name});
         }
 
-        // Category badge
-        if (item.category_id) |cat_id| {
-            for (categories) |cat| {
-                if (std.mem.eql(u8, cat.id, cat_id)) {
-                    if (is_selected) {
-                        try w.print("  {s}[{s}]{s}", .{ Color.dim, cat.name, Color.reset });
-                    } else {
-                        try w.print("  {s}[{s}]{s}", .{ Color.yellow, cat.name, Color.reset });
-                    }
-                    break;
-                }
+        // Container badge
+        if (resolveContainerLabel(state, item)) |label| {
+            if (is_selected) {
+                try w.print("  {s}[{s}]{s}", .{ Color.dim, label, Color.reset });
+            } else {
+                try w.print("  {s}[{s}]{s}", .{ Color.yellow, label, Color.reset });
             }
         }
 
-        // Mail (dimmed)
-        if (item.mail) |mail| {
-            try w.print("  {s}{s}{s}", .{ Color.dim, mail, Color.reset });
+        // Username/email (dimmed)
+        if (itemPrimaryIdentifier(item)) |id_text| {
+            try w.print("  {s}{s}{s}", .{ Color.dim, id_text, Color.reset });
         }
         try w.writeAll("\n");
     }
@@ -337,10 +331,9 @@ fn drawItemList(w: *Writer, state: *TuiState) !void {
 }
 
 fn drawItemDetail(w: *Writer, state: *const TuiState) !void {
-    const items = state.session.vault.items;
+    const items = state.session.vault_v2.items;
     if (state.selected >= items.len) return;
     const item = items[state.selected];
-    const categories = state.session.vault.categories;
 
     try w.writeAll("\n");
     try w.print("  {s}{s}Item Detail{s}\n", .{ Color.bold, Color.bright_white, Color.reset });
@@ -353,22 +346,23 @@ fn drawItemDetail(w: *Writer, state: *const TuiState) !void {
 
     // Name
     try w.print("  {s}Name:{s}     {s}\n", .{
-        Color.cyan, Color.reset, item.name orelse "(none)",
+        Color.cyan, Color.reset, if (item.name.len > 0) item.name else "(none)",
     });
 
     // Type
     try w.print("  {s}Type:{s}     {s}\n", .{
-        Color.cyan, Color.reset, itemTypeLabel(item.item_type),
+        Color.cyan, Color.reset, itemTypeLabel(item.type),
     });
 
-    // Mail
-    try w.print("  {s}Mail:{s}     {s}\n", .{
-        Color.cyan, Color.reset, item.mail orelse "(none)",
+    // Username/email
+    try w.print("  {s}User:{s}     {s}\n", .{
+        Color.cyan, Color.reset, itemPrimaryIdentifier(item) orelse "(none)",
     });
 
     // Password (masked)
     try w.print("  {s}Password:{s} {s}", .{ Color.cyan, Color.reset, Color.dim });
-    for (item.password) |_| {
+    const secret = itemPrimarySecret(item);
+    for (secret) |_| {
         try w.writeAll(Icon.dot);
     }
     try w.print("{s}\n", .{Color.reset});
@@ -378,17 +372,10 @@ fn drawItemDetail(w: *Writer, state: *const TuiState) !void {
         Color.cyan, Color.reset, item.notes orelse "(none)",
     });
 
-    // Category
-    var cat_name: []const u8 = "(none)";
-    if (item.category_id) |cat_id| {
-        for (categories) |cat| {
-            if (std.mem.eql(u8, cat.id, cat_id)) {
-                cat_name = cat.name;
-                break;
-            }
-        }
-    }
-    try w.print("  {s}Category:{s} {s}\n", .{ Color.cyan, Color.reset, cat_name });
+    // Container
+    try w.print("  {s}Container:{s} {s}\n", .{
+        Color.cyan, Color.reset, resolveContainerLabel(state, item) orelse "(none)",
+    });
 
     try w.writeAll("\n");
     try w.print("  {s}p{s}{s} reveal password  {s}y{s}{s} copy password{s}\n", .{
@@ -404,6 +391,47 @@ fn itemTypeLabel(item_type: u8) []const u8 {
         4 => "identity",
         else => "unknown",
     };
+}
+
+fn itemPrimaryIdentifier(item: schema.Item) ?[]const u8 {
+    if (item.login) |login| {
+        if (login.username) |username| {
+            if (username.len > 0) return username;
+        }
+    }
+    if (item.identity) |identity| {
+        if (identity.email) |email| {
+            if (email.len > 0) return email;
+        }
+    }
+    return null;
+}
+
+fn itemPrimarySecret(item: schema.Item) []const u8 {
+    if (item.login) |login| {
+        if (login.password) |password| return password;
+    }
+    if (item.card) |card| {
+        if (card.number) |number| return number;
+    }
+    return "";
+}
+
+fn resolveContainerLabel(state: *const TuiState, item: schema.Item) ?[]const u8 {
+    if (item.folderId) |folder_id| {
+        for (state.session.vault_v2.folders) |folder| {
+            if (std.mem.eql(u8, folder.id, folder_id)) return folder.name;
+        }
+    }
+    if (item.collectionIds) |collection_ids| {
+        for (collection_ids) |maybe_collection_id| {
+            const collection_id = maybe_collection_id orelse continue;
+            for (state.session.vault_v2.collections) |collection| {
+                if (std.mem.eql(u8, collection.id, collection_id)) return collection.name;
+            }
+        }
+    }
+    return null;
 }
 
 fn drawCategoryList(w: *Writer, state: *TuiState) !void {
@@ -781,7 +809,25 @@ fn persistVault(state: *TuiState) !void {
         state.setMessage("Failed to save vault!", true);
         return;
     };
+    refreshSessionV2FromDisk(state) catch {
+        state.setMessage("Saved, but failed to refresh v2 session", true);
+        return;
+    };
     state.session.dirty = false;
+}
+
+fn refreshSessionV2FromDisk(state: *TuiState) !void {
+    const loaded = try storage.loadVaultV2WithKey(
+        state.allocator,
+        &state.session.key,
+        state.session.vault_path,
+    );
+
+    state.session.vault_v2_arena.deinit();
+    state.session.vault_v2 = loaded.vault;
+    state.session.vault_v2_arena = loaded.arena;
+    state.session.vault_v2_allocator = state.session.vault_v2_arena.allocator();
+    state.session.salt = loaded.salt;
 }
 
 // ─── Input handling ─────────────────────────────────────────────────────────
@@ -805,7 +851,7 @@ fn handleInput(state: *TuiState, ev: KeyEvent) !void {
 }
 
 fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
-    const count = state.session.vault.items.len;
+    const count = state.session.vault_v2.items.len;
     switch (ev.key) {
         .up => {
             if (state.selected > 0) state.selected -= 1;
@@ -846,7 +892,8 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
             },
             'd' => {
                 if (count > 0) {
-                    state.delete_target_name = state.session.vault.items[state.selected].name orelse "(unnamed)";
+                    const selected_item = state.session.vault_v2.items[state.selected];
+                    state.delete_target_name = if (selected_item.name.len > 0) selected_item.name else "(unnamed)";
                     state.delete_is_category = false;
                     state.prev_screen = .item_list;
                     state.screen = .confirm_delete;
@@ -889,18 +936,19 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
                 state.screen = .item_form;
             },
             'd' => {
-                state.delete_target_name = state.session.vault.items[state.selected].name orelse "(unnamed)";
+                const selected_item = state.session.vault_v2.items[state.selected];
+                state.delete_target_name = if (selected_item.name.len > 0) selected_item.name else "(unnamed)";
                 state.delete_is_category = false;
                 state.prev_screen = .item_detail;
                 state.screen = .confirm_delete;
             },
             'p' => {
                 // Toggle reveal password (just show it as a message for now)
-                const pw = state.session.vault.items[state.selected].password;
+                const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
                 state.setMessage(pw, false);
             },
             'y' => {
-                const pw = state.session.vault.items[state.selected].password;
+                const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
                 const copied = utils.copyToClipboard(state.allocator, pw) catch false;
                 if (copied) {
                     state.setMessage("Password copied to clipboard", false);
