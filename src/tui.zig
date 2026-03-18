@@ -6,6 +6,7 @@ const storage = @import("storage.zig");
 const bip39 = @import("bip39.zig");
 const vault_service_v2 = @import("vault_service_v2.zig");
 const schema = @import("schema_v2.zig");
+const relations_v2 = @import("relations_v2.zig");
 
 pub const Color = utils.Color;
 pub const Box = utils.Box;
@@ -552,13 +553,6 @@ fn containerDisplayName(state: *const TuiState, sel: ContainerSelection) []const
     return switch (sel.kind) {
         .folder => state.session.vault_v2.folders[sel.index].name,
         .collection => state.session.vault_v2.collections[sel.index].name,
-    };
-}
-
-fn containerKindLabel(kind: ContainerKind) []const u8 {
-    return switch (kind) {
-        .folder => "folder",
-        .collection => "collection",
     };
 }
 
@@ -1170,7 +1164,8 @@ fn saveCategoryForm(state: *TuiState) !void {
     state.session.dirty = true;
     try persistVault(state);
     state.screen = .category_list;
-    if (state.selected >= state.itemCount() and state.selected > 0) state.selected -= 1;
+    const container_total = state.session.vault_v2.folders.len + state.session.vault_v2.collections.len;
+    if (state.selected >= container_total and state.selected > 0) state.selected -= 1;
 }
 
 fn resolveFolderIdByName(state: *const TuiState, folder_name: []const u8) !?[]const u8 {
@@ -1493,7 +1488,27 @@ fn deleteSelectedCategory(state: *TuiState) !void {
     state.screen = .category_list;
 }
 
+fn validateV2Relations(state: *TuiState) bool {
+    var normalized = relations_v2.build(state.allocator, &state.session.vault_v2) catch |err| {
+        const msg = switch (err) {
+            error.UnknownFolderId => "Invalid relation: item references unknown folder",
+            error.UnknownCollectionId => "Invalid relation: item references unknown collection",
+            error.OrganizationMismatch => "Invalid relation: organization mismatch on collection link",
+            error.DuplicateItemId => "Invalid relation: duplicate item id",
+            error.DuplicateFolderId => "Invalid relation: duplicate folder id",
+            error.DuplicateCollectionId => "Invalid relation: duplicate collection id",
+            else => "Failed to validate vault relations",
+        };
+        state.setMessage(msg, true);
+        return false;
+    };
+    normalized.deinit(state.allocator);
+    return true;
+}
+
 fn persistVault(state: *TuiState) !void {
+    if (!validateV2Relations(state)) return;
+
     storage.saveVault(
         state.allocator,
         state.session.vault,
@@ -1775,6 +1790,89 @@ fn generatePasswordInForm(state: *TuiState) !void {
     } else {
         state.setMessage("Wordlist not loaded", true);
     }
+}
+
+fn makeTestSession(allocator: std.mem.Allocator) !VaultSession {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    const a = arena.allocator();
+    return .{
+        .vault = .{
+            .version = 1,
+            .items = try allocator.alloc(model.Item, 0),
+            .categories = try allocator.alloc(model.Category, 0),
+        },
+        .vault_v2 = .{
+            .version = 2,
+            .encrypted = false,
+            .source = .unknown,
+            .folders = try a.alloc(schema.Folder, 0),
+            .collections = try a.alloc(schema.Collection, 0),
+            .items = try a.alloc(schema.Item, 0),
+        },
+        .vault_v2_arena = arena,
+        .vault_v2_allocator = a,
+        .key = [_]u8{0} ** crypto.KEY_LEN,
+        .salt = [_]u8{0} ** crypto.SALT_LEN,
+        .vault_path = try allocator.dupe(u8, "/tmp/tui-test-vault.enc"),
+    };
+}
+
+test "parseCollectionIdsByName resolves names to ids" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator);
+    defer {
+        allocator.free(session.vault_path);
+        session.deinit(allocator);
+    }
+
+    const collection_id = try vault_service_v2.createCollection(
+        session.vault_v2_allocator,
+        &session.vault_v2,
+        "org-1",
+        "Engineering",
+    );
+    _ = collection_id;
+
+    var state = TuiState.init(allocator, &session);
+    const ids = try parseCollectionIdsByName(&state, "Engineering");
+    defer if (ids.len > 0) allocator.free(ids);
+
+    try std.testing.expectEqual(@as(usize, 1), ids.len);
+    try std.testing.expectEqualStrings(session.vault_v2.collections[0].id, ids[0]);
+}
+
+test "removeContainerAtSelection deletes collection links from items" {
+    const allocator = std.testing.allocator;
+    var session = try makeTestSession(allocator);
+    defer {
+        allocator.free(session.vault_path);
+        session.deinit(allocator);
+    }
+
+    const collection_id = try vault_service_v2.createCollection(
+        session.vault_v2_allocator,
+        &session.vault_v2,
+        "org-1",
+        "Engineering",
+    );
+    _ = try vault_service_v2.createItem(
+        session.vault_v2_allocator,
+        &session.vault_v2,
+        .{
+            .type = .secure_note,
+            .name = "Shared note",
+            .organization_id = "org-1",
+            .collection_ids = &.{collection_id},
+        },
+    );
+    try std.testing.expect(session.vault_v2.items[0].collectionIds != null);
+
+    var state = TuiState.init(allocator, &session);
+    state.selected = 0;
+    try removeContainerAtSelection(&state, .{ .kind = .collection, .index = 0 });
+
+    try std.testing.expectEqual(@as(usize, 0), session.vault_v2.collections.len);
+    try std.testing.expect(session.vault_v2.items[0].collectionIds == null);
 }
 
 // ─── Public entry point ─────────────────────────────────────────────────────
