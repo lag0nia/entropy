@@ -117,11 +117,12 @@ const TuiState = struct {
     message_is_error: bool = false,
 
     // Form state
-    form_fields: [5]InputField = undefined,
+    form_fields: [12]InputField = undefined,
     form_field_count: usize = 0,
     form_active_field: usize = 0,
     form_editing_index: ?usize = null, // null = creating new
     form_is_category: bool = false,
+    item_form_type: schema.ItemType = .login,
 
     // Delete confirm
     delete_target_name: []const u8 = "",
@@ -491,9 +492,17 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
         (if (state.form_is_category) "Edit Category" else "Edit Item")
     else
         (if (state.form_is_category) "New Category" else "New Item");
+    const item_type_hint: []const u8 = if (state.form_is_category) "" else itemTypeLabel(@intFromEnum(state.item_form_type));
 
     try w.writeAll("\n");
-    try w.print("  {s}{s}{s}{s}\n", .{ Color.bold, Color.bright_white, title, Color.reset });
+    if (state.form_is_category) {
+        try w.print("  {s}{s}{s}{s}\n", .{ Color.bold, Color.bright_white, title, Color.reset });
+    } else {
+        try w.print("  {s}{s}{s}{s} {s}[{s}]{s}\n", .{
+            Color.bold, Color.bright_white, title, Color.reset,
+            Color.dim, item_type_hint, Color.reset,
+        });
+    }
     try w.print("  {s}", .{Color.bright_black});
     var sep_i: usize = 0;
     while (sep_i < @min(state.cols -| 4, 50)) : (sep_i += 1) {
@@ -516,13 +525,22 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
 
     try w.writeAll("\n");
     if (!state.form_is_category) {
-        try w.print("  {s}Tab{s}{s} next field  {s}Ctrl+G{s}{s} generate password  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
-            Color.bold,  Color.reset, Color.dim,
-            Color.bold,  Color.reset, Color.dim,
-            Color.bold,  Color.reset, Color.dim,
-            Color.bold,  Color.reset, Color.dim,
-            Color.reset,
-        });
+        if (state.item_form_type == .login) {
+            try w.print("  {s}Tab{s}{s} next field  {s}Ctrl+G{s}{s} generate password  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+                Color.bold,  Color.reset, Color.dim,
+                Color.bold,  Color.reset, Color.dim,
+                Color.bold,  Color.reset, Color.dim,
+                Color.bold,  Color.reset, Color.dim,
+                Color.reset,
+            });
+        } else {
+            try w.print("  {s}Tab{s}{s} next field  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+                Color.bold,  Color.reset, Color.dim,
+                Color.bold,  Color.reset, Color.dim,
+                Color.bold,  Color.reset, Color.dim,
+                Color.reset,
+            });
+        }
     } else {
         try w.print("  {s}Tab{s}{s} next field  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
             Color.bold,  Color.reset, Color.dim,
@@ -559,14 +577,14 @@ fn drawHelp(w: *Writer, state: *const TuiState) !void {
     try w.print("{s}\n\n", .{Color.reset});
 
     try w.print("  {s}Item list{s}\n", .{ Color.cyan, Color.reset });
-    try w.writeAll("    Up/Down navigate, Enter detail, n new, e edit, d delete, c categories, q quit\n");
+    try w.writeAll("    Up/Down navigate, Enter detail, n/1 login, 2 note, 3 card, 4 identity, e edit, d delete, c categories, q quit\n");
 
     try w.print("\n  {s}Item detail{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    p reveal password in message area, y copy password to clipboard\n");
 
     try w.print("\n  {s}Item/category forms{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    Tab next field, Enter save, Esc cancel\n");
-    try w.writeAll("    Ctrl+G generate password (only item form)\n");
+    try w.writeAll("    Ctrl+G generate password (login form)\n");
 
     try w.print("\n  {s}Global{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    ? open help, Esc or q close help\n\n");
@@ -594,6 +612,7 @@ fn drawFooter(w: *Writer, state: *const TuiState) !void {
     switch (state.screen) {
         .item_list => {
             try drawKeyHint(w, "n", "new");
+            try drawKeyHint(w, "1..4", "new type");
             try drawKeyHint(w, "e", "edit");
             try drawKeyHint(w, "d", "delete");
             try drawKeyHint(w, "Enter", "detail");
@@ -652,15 +671,60 @@ fn render(w: *Writer, state: *TuiState) !void {
 
 // ─── Item CRUD ──────────────────────────────────────────────────────────────
 
-fn initItemForm(state: *TuiState) void {
+fn initItemFormForType(state: *TuiState, item_type: schema.ItemType) void {
     state.form_is_category = false;
-    state.form_field_count = 5;
     state.form_active_field = 0;
-    state.form_fields[0] = .{ .label = "Name:" };
-    state.form_fields[1] = .{ .label = "User:" };
-    state.form_fields[2] = .{ .label = "Password:" };
-    state.form_fields[3] = .{ .label = "Notes:" };
-    state.form_fields[4] = .{ .label = "Folder:" };
+    state.item_form_type = item_type;
+
+    switch (item_type) {
+        .login => {
+            state.form_field_count = 9;
+            state.form_fields[0] = .{ .label = "Name:" };
+            state.form_fields[1] = .{ .label = "User:" };
+            state.form_fields[2] = .{ .label = "Password:" };
+            state.form_fields[3] = .{ .label = "TOTP:" };
+            state.form_fields[4] = .{ .label = "URL:" };
+            state.form_fields[5] = .{ .label = "Notes:" };
+            state.form_fields[6] = .{ .label = "Folder:" };
+            state.form_fields[7] = .{ .label = "Collections:" };
+            state.form_fields[8] = .{ .label = "Org ID:" };
+        },
+        .secure_note => {
+            state.form_field_count = 6;
+            state.form_fields[0] = .{ .label = "Name:" };
+            state.form_fields[1] = .{ .label = "NoteType:" };
+            state.form_fields[2] = .{ .label = "Notes:" };
+            state.form_fields[3] = .{ .label = "Folder:" };
+            state.form_fields[4] = .{ .label = "Collections:" };
+            state.form_fields[5] = .{ .label = "Org ID:" };
+        },
+        .card => {
+            state.form_field_count = 11;
+            state.form_fields[0] = .{ .label = "Name:" };
+            state.form_fields[1] = .{ .label = "Number:" };
+            state.form_fields[2] = .{ .label = "Brand:" };
+            state.form_fields[3] = .{ .label = "Code:" };
+            state.form_fields[4] = .{ .label = "Holder:" };
+            state.form_fields[5] = .{ .label = "ExpMonth:" };
+            state.form_fields[6] = .{ .label = "ExpYear:" };
+            state.form_fields[7] = .{ .label = "Notes:" };
+            state.form_fields[8] = .{ .label = "Folder:" };
+            state.form_fields[9] = .{ .label = "Collections:" };
+            state.form_fields[10] = .{ .label = "Org ID:" };
+        },
+        .identity => {
+            state.form_field_count = 9;
+            state.form_fields[0] = .{ .label = "Name:" };
+            state.form_fields[1] = .{ .label = "FirstName:" };
+            state.form_fields[2] = .{ .label = "LastName:" };
+            state.form_fields[3] = .{ .label = "Email:" };
+            state.form_fields[4] = .{ .label = "Phone:" };
+            state.form_fields[5] = .{ .label = "Notes:" };
+            state.form_fields[6] = .{ .label = "Folder:" };
+            state.form_fields[7] = .{ .label = "Collections:" };
+            state.form_fields[8] = .{ .label = "Org ID:" };
+        },
+    }
 }
 
 fn initCategoryForm(state: *TuiState) void {
@@ -671,55 +735,193 @@ fn initCategoryForm(state: *TuiState) void {
 }
 
 fn saveItemForm(state: *TuiState) !void {
-    const name = state.form_fields[0].slice();
-    const user = state.form_fields[1].slice();
-    const password_input = state.form_fields[2].slice();
-    const notes = state.form_fields[3].slice();
-    const folder_name = state.form_fields[4].slice();
-    const folder_id = resolveFolderIdByName(state, folder_name) catch {
-        state.setMessage("Folder not found", true);
-        return;
+    var generated_pw: ?[]u8 = null;
+    defer if (generated_pw) |pw| state.allocator.free(pw);
+
+    var collection_ids: []const []const u8 = &.{};
+    defer if (collection_ids.len > 0) state.allocator.free(collection_ids);
+
+    var input = vault_service_v2.CreateItemInput{
+        .type = state.item_form_type,
+        .name = "",
     };
+
+    switch (state.item_form_type) {
+        .login => {
+            const name = state.form_fields[0].slice();
+            const user = state.form_fields[1].slice();
+            const password_field = state.form_fields[2].slice();
+            const totp = state.form_fields[3].slice();
+            const url = state.form_fields[4].slice();
+            const notes = state.form_fields[5].slice();
+            const folder_name = state.form_fields[6].slice();
+            const collections_raw = state.form_fields[7].slice();
+            const org_id = state.form_fields[8].slice();
+
+            if (name.len == 0 and user.len == 0) {
+                state.setMessage("Name or user is required", true);
+                return;
+            }
+
+            const resolved_folder_id = resolveFolderIdByName(state, folder_name) catch {
+                state.setMessage("Folder not found", true);
+                return;
+            };
+            collection_ids = parseCollectionIdsByName(state, collections_raw) catch {
+                state.setMessage("Collection not found", true);
+                return;
+            };
+
+            var login_password: ?[]const u8 = if (password_field.len > 0) password_field else null;
+            if (state.form_editing_index == null and login_password == null) {
+                const wl = state.wordlist orelse {
+                    state.setMessage("No wordlist loaded for generation", true);
+                    return;
+                };
+                const pw = try bip39.generateMnemonic(state.allocator, wl, "-");
+                generated_pw = pw;
+                login_password = pw;
+            }
+
+            input = .{
+                .type = .login,
+                .name = if (name.len > 0) name else user,
+                .notes = notes,
+                .organization_id = if (org_id.len > 0) org_id else null,
+                .folder_id = resolved_folder_id,
+                .collection_ids = collection_ids,
+                .login_username = if (user.len > 0) user else null,
+                .login_password = login_password,
+                .login_totp = if (totp.len > 0) totp else null,
+                .login_uri = if (url.len > 0) url else null,
+            };
+        },
+        .secure_note => {
+            const name = state.form_fields[0].slice();
+            const note_type_raw = state.form_fields[1].slice();
+            const notes = state.form_fields[2].slice();
+            const folder_name = state.form_fields[3].slice();
+            const collections_raw = state.form_fields[4].slice();
+            const org_id = state.form_fields[5].slice();
+
+            if (name.len == 0) {
+                state.setMessage("Name is required", true);
+                return;
+            }
+            const resolved_folder_id = resolveFolderIdByName(state, folder_name) catch {
+                state.setMessage("Folder not found", true);
+                return;
+            };
+            collection_ids = parseCollectionIdsByName(state, collections_raw) catch {
+                state.setMessage("Collection not found", true);
+                return;
+            };
+
+            input = .{
+                .type = .secure_note,
+                .name = name,
+                .notes = notes,
+                .organization_id = if (org_id.len > 0) org_id else null,
+                .folder_id = resolved_folder_id,
+                .collection_ids = collection_ids,
+                .secure_note_type = std.fmt.parseInt(u8, note_type_raw, 10) catch 0,
+            };
+        },
+        .card => {
+            const name = state.form_fields[0].slice();
+            const number = state.form_fields[1].slice();
+            const brand = state.form_fields[2].slice();
+            const code = state.form_fields[3].slice();
+            const holder = state.form_fields[4].slice();
+            const exp_month = state.form_fields[5].slice();
+            const exp_year = state.form_fields[6].slice();
+            const notes = state.form_fields[7].slice();
+            const folder_name = state.form_fields[8].slice();
+            const collections_raw = state.form_fields[9].slice();
+            const org_id = state.form_fields[10].slice();
+
+            if (name.len == 0) {
+                state.setMessage("Name is required", true);
+                return;
+            }
+            const resolved_folder_id = resolveFolderIdByName(state, folder_name) catch {
+                state.setMessage("Folder not found", true);
+                return;
+            };
+            collection_ids = parseCollectionIdsByName(state, collections_raw) catch {
+                state.setMessage("Collection not found", true);
+                return;
+            };
+
+            input = .{
+                .type = .card,
+                .name = name,
+                .notes = notes,
+                .organization_id = if (org_id.len > 0) org_id else null,
+                .folder_id = resolved_folder_id,
+                .collection_ids = collection_ids,
+                .card_number = if (number.len > 0) number else null,
+                .card_brand = if (brand.len > 0) brand else null,
+                .card_code = if (code.len > 0) code else null,
+                .card_holder = if (holder.len > 0) holder else null,
+                .card_exp_month = if (exp_month.len > 0) exp_month else null,
+                .card_exp_year = if (exp_year.len > 0) exp_year else null,
+            };
+        },
+        .identity => {
+            const name = state.form_fields[0].slice();
+            const first_name = state.form_fields[1].slice();
+            const last_name = state.form_fields[2].slice();
+            const email = state.form_fields[3].slice();
+            const phone = state.form_fields[4].slice();
+            const notes = state.form_fields[5].slice();
+            const folder_name = state.form_fields[6].slice();
+            const collections_raw = state.form_fields[7].slice();
+            const org_id = state.form_fields[8].slice();
+
+            if (name.len == 0) {
+                state.setMessage("Name is required", true);
+                return;
+            }
+            const resolved_folder_id = resolveFolderIdByName(state, folder_name) catch {
+                state.setMessage("Folder not found", true);
+                return;
+            };
+            collection_ids = parseCollectionIdsByName(state, collections_raw) catch {
+                state.setMessage("Collection not found", true);
+                return;
+            };
+
+            input = .{
+                .type = .identity,
+                .name = name,
+                .notes = notes,
+                .organization_id = if (org_id.len > 0) org_id else null,
+                .folder_id = resolved_folder_id,
+                .collection_ids = collection_ids,
+                .identity_first_name = if (first_name.len > 0) first_name else null,
+                .identity_last_name = if (last_name.len > 0) last_name else null,
+                .identity_email = if (email.len > 0) email else null,
+                .identity_phone = if (phone.len > 0) phone else null,
+            };
+        },
+    }
 
     if (state.form_editing_index) |idx| {
         if (idx >= state.session.vault_v2.items.len) {
             state.setMessage("Invalid item selection", true);
             return;
         }
-        try updateV2ItemFromForm(state, idx, name, user, password_input, notes, folder_id, folder_name.len > 0);
+        updateV2ItemFromForm(state, idx, input) catch {
+            state.setMessage("Failed to update item", true);
+            return;
+        };
         state.setMessage("Item updated", false);
     } else {
-        if (name.len == 0 and user.len == 0) {
-            state.setMessage("Name or user is required", true);
-            return;
-        }
-
-        var generated_pw: ?[]u8 = null;
-        defer if (generated_pw) |pw| state.allocator.free(pw);
-        const password = if (password_input.len > 0)
-            password_input
-        else blk: {
-            const wl = state.wordlist orelse {
-                state.setMessage("No wordlist loaded for generation", true);
-                return;
-            };
-            const pw = try bip39.generateMnemonic(state.allocator, wl, "-");
-            generated_pw = pw;
-            break :blk pw;
-        };
-
-        const display_name = if (name.len > 0) name else user;
         _ = vault_service_v2.createItem(
             state.session.vault_v2_allocator,
             &state.session.vault_v2,
-            .{
-                .type = .login,
-                .name = display_name,
-                .notes = notes,
-                .folder_id = folder_id,
-                .login_username = if (user.len > 0) user else null,
-                .login_password = password,
-            },
+            input,
         ) catch {
             state.setMessage("Failed to create item", true);
             return;
@@ -784,58 +986,159 @@ fn resolveFolderIdByName(state: *const TuiState, folder_name: []const u8) !?[]co
     return error.FolderNotFound;
 }
 
+fn parseCollectionIdsByName(state: *const TuiState, raw: []const u8) ![]const []const u8 {
+    if (raw.len == 0) return &.{};
+
+    var ids = std.ArrayList([]const u8){};
+    errdefer ids.deinit(state.allocator);
+
+    var tok = std.mem.tokenizeScalar(u8, raw, ',');
+    while (tok.next()) |entry| {
+        const name = std.mem.trim(u8, entry, " \t");
+        if (name.len == 0) continue;
+
+        var found: ?[]const u8 = null;
+        for (state.session.vault_v2.collections) |collection| {
+            if (std.mem.eql(u8, collection.name, name)) {
+                found = collection.id;
+                break;
+            }
+        }
+        if (found == null) return error.CollectionNotFound;
+        try ids.append(state.allocator, found.?);
+    }
+
+    return ids.toOwnedSlice(state.allocator);
+}
+
 fn updateV2ItemFromForm(
     state: *TuiState,
     item_index: usize,
-    name: []const u8,
-    user: []const u8,
-    password: []const u8,
-    notes: []const u8,
-    folder_id: ?[]const u8,
-    folder_override: bool,
+    input: vault_service_v2.CreateItemInput,
 ) !void {
     const allocator = state.session.vault_v2_allocator;
     var item = &state.session.vault_v2.items[item_index];
 
-    const next_name = if (name.len > 0)
-        name
-    else if (user.len > 0)
-        user
-    else
-        item.name;
-    const new_name = try allocator.dupe(u8, next_name);
+    const new_name = try allocator.dupe(u8, input.name);
     allocator.free(item.name);
     item.name = new_name;
 
-    if (item.notes) |v| allocator.free(v);
-    item.notes = if (notes.len > 0) try allocator.dupe(u8, notes) else null;
+    if (item.organizationId) |v| allocator.free(v);
+    item.organizationId = if (input.organization_id) |v| try allocator.dupe(u8, v) else null;
 
-    if (folder_override) {
-        if (item.folderId) |v| allocator.free(v);
-        item.folderId = if (folder_id) |id| try allocator.dupe(u8, id) else null;
+    if (item.notes) |v| allocator.free(v);
+    item.notes = if (input.notes.len > 0) try allocator.dupe(u8, input.notes) else null;
+
+    if (item.folderId) |v| allocator.free(v);
+    item.folderId = if (input.folder_id) |v| try allocator.dupe(u8, v) else null;
+
+    if (item.collectionIds) |ids| {
+        for (ids) |maybe_id| {
+            if (maybe_id) |id| allocator.free(id);
+        }
+        allocator.free(ids);
+    }
+    if (input.collection_ids.len > 0) {
+        var ids = try allocator.alloc(?[]const u8, input.collection_ids.len);
+        var i: usize = 0;
+        errdefer {
+            for (0..i) |j| allocator.free(ids[j].?);
+            allocator.free(ids);
+        }
+        for (input.collection_ids, 0..) |collection_id, idx| {
+            ids[idx] = try allocator.dupe(u8, collection_id);
+            i += 1;
+        }
+        item.collectionIds = ids;
+    } else {
+        item.collectionIds = null;
     }
 
-    switch (item.type) {
-        1 => {
+    item.type = @intFromEnum(input.type);
+    switch (input.type) {
+        .login => {
             if (item.login == null) item.login = .{};
-            if (item.login.?.username) |v| allocator.free(v);
-            item.login.?.username = if (user.len > 0) try allocator.dupe(u8, user) else null;
-            if (password.len > 0) {
+
+            if (input.login_username) |username| {
+                if (item.login.?.username) |v| allocator.free(v);
+                item.login.?.username = try allocator.dupe(u8, username);
+            }
+            if (input.login_password) |password| {
                 if (item.login.?.password) |v| allocator.free(v);
                 item.login.?.password = try allocator.dupe(u8, password);
             }
-        },
-        3 => {
-            if (item.card == null) item.card = .{};
-            if (password.len > 0) {
-                if (item.card.?.number) |v| allocator.free(v);
-                item.card.?.number = try allocator.dupe(u8, password);
+            if (input.login_totp) |totp| {
+                if (item.login.?.totp) |v| allocator.free(v);
+                item.login.?.totp = try allocator.dupe(u8, totp);
+            }
+            if (input.login_uri) |uri| {
+                if (item.login.?.uris) |uris| {
+                    for (uris) |old_uri| {
+                        if (old_uri.uri) |v| allocator.free(v);
+                    }
+                    allocator.free(uris);
+                }
+                if (uri.len > 0) {
+                    var uris = try allocator.alloc(schema.LoginUri, 1);
+                    uris[0] = .{
+                        .uri = try allocator.dupe(u8, uri),
+                        .match = null,
+                    };
+                    item.login.?.uris = uris;
+                } else {
+                    item.login.?.uris = null;
+                }
             }
         },
-        4 => {
+        .secure_note => {
+            if (item.secureNote == null) item.secureNote = .{};
+            item.secureNote.?.type = input.secure_note_type;
+        },
+        .card => {
+            if (item.card == null) item.card = .{};
+            if (input.card_number) |number| {
+                if (item.card.?.number) |v| allocator.free(v);
+                item.card.?.number = try allocator.dupe(u8, number);
+            }
+            if (input.card_brand) |brand| {
+                if (item.card.?.brand) |v| allocator.free(v);
+                item.card.?.brand = try allocator.dupe(u8, brand);
+            }
+            if (input.card_code) |code| {
+                if (item.card.?.code) |v| allocator.free(v);
+                item.card.?.code = try allocator.dupe(u8, code);
+            }
+            if (input.card_holder) |holder| {
+                if (item.card.?.cardholderName) |v| allocator.free(v);
+                item.card.?.cardholderName = try allocator.dupe(u8, holder);
+            }
+            if (input.card_exp_month) |exp_month| {
+                if (item.card.?.expMonth) |v| allocator.free(v);
+                item.card.?.expMonth = try allocator.dupe(u8, exp_month);
+            }
+            if (input.card_exp_year) |exp_year| {
+                if (item.card.?.expYear) |v| allocator.free(v);
+                item.card.?.expYear = try allocator.dupe(u8, exp_year);
+            }
+        },
+        .identity => {
             if (item.identity == null) item.identity = .{};
-            if (item.identity.?.email) |v| allocator.free(v);
-            item.identity.?.email = if (user.len > 0) try allocator.dupe(u8, user) else null;
+            if (input.identity_email) |email| {
+                if (item.identity.?.email) |v| allocator.free(v);
+                item.identity.?.email = try allocator.dupe(u8, email);
+            }
+            if (input.identity_first_name) |first_name| {
+                if (item.identity.?.firstName) |v| allocator.free(v);
+                item.identity.?.firstName = try allocator.dupe(u8, first_name);
+            }
+            if (input.identity_last_name) |last_name| {
+                if (item.identity.?.lastName) |v| allocator.free(v);
+                item.identity.?.lastName = try allocator.dupe(u8, last_name);
+            }
+            if (input.identity_phone) |phone| {
+                if (item.identity.?.phone) |v| allocator.free(v);
+                item.identity.?.phone = try allocator.dupe(u8, phone);
+            }
         },
         else => {},
     }
@@ -854,23 +1157,103 @@ fn rebuildRuntimeFromV2(state: *TuiState) !void {
 }
 
 fn prefillItemFormFromV2(state: *TuiState, item: schema.Item) void {
+    const item_type: schema.ItemType = switch (item.type) {
+        2 => .secure_note,
+        3 => .card,
+        4 => .identity,
+        else => .login,
+    };
+    initItemFormForType(state, item_type);
+
     state.form_fields[0].setFromSlice(item.name);
-    if (itemPrimaryIdentifier(item)) |id_text| {
-        state.form_fields[1].setFromSlice(id_text);
+    switch (item_type) {
+        .login => {
+            if (item.login) |login| {
+                if (login.username) |username| state.form_fields[1].setFromSlice(username);
+                if (login.password) |password| state.form_fields[2].setFromSlice(password);
+                if (login.totp) |totp| state.form_fields[3].setFromSlice(totp);
+                if (login.uris) |uris| {
+                    if (uris.len > 0 and uris[0].uri != null) {
+                        state.form_fields[4].setFromSlice(uris[0].uri.?);
+                    }
+                }
+            }
+            if (item.notes) |notes| state.form_fields[5].setFromSlice(notes);
+            if (item.organizationId) |org_id| state.form_fields[8].setFromSlice(org_id);
+            fillContainerFields(state, item, 6, 7);
+        },
+        .secure_note => {
+            if (item.secureNote) |secure_note| {
+                if (secure_note.type) |note_type| {
+                    var buf: [4]u8 = undefined;
+                    const out = std.fmt.bufPrint(&buf, "{d}", .{note_type}) catch "";
+                    state.form_fields[1].setFromSlice(out);
+                }
+            }
+            if (item.notes) |notes| state.form_fields[2].setFromSlice(notes);
+            fillContainerFields(state, item, 3, 4);
+            if (item.organizationId) |org_id| state.form_fields[5].setFromSlice(org_id);
+        },
+        .card => {
+            if (item.card) |card| {
+                if (card.number) |number| state.form_fields[1].setFromSlice(number);
+                if (card.brand) |brand| state.form_fields[2].setFromSlice(brand);
+                if (card.code) |code| state.form_fields[3].setFromSlice(code);
+                if (card.cardholderName) |holder| state.form_fields[4].setFromSlice(holder);
+                if (card.expMonth) |exp_month| state.form_fields[5].setFromSlice(exp_month);
+                if (card.expYear) |exp_year| state.form_fields[6].setFromSlice(exp_year);
+            }
+            if (item.notes) |notes| state.form_fields[7].setFromSlice(notes);
+            fillContainerFields(state, item, 8, 9);
+            if (item.organizationId) |org_id| state.form_fields[10].setFromSlice(org_id);
+        },
+        .identity => {
+            if (item.identity) |identity| {
+                if (identity.firstName) |first_name| state.form_fields[1].setFromSlice(first_name);
+                if (identity.lastName) |last_name| state.form_fields[2].setFromSlice(last_name);
+                if (identity.email) |email| state.form_fields[3].setFromSlice(email);
+                if (identity.phone) |phone| state.form_fields[4].setFromSlice(phone);
+            }
+            if (item.notes) |notes| state.form_fields[5].setFromSlice(notes);
+            fillContainerFields(state, item, 6, 7);
+            if (item.organizationId) |org_id| state.form_fields[8].setFromSlice(org_id);
+        },
     }
-    const secret = itemPrimarySecret(item);
-    if (secret.len > 0) {
-        state.form_fields[2].setFromSlice(secret);
-    }
-    if (item.notes) |notes| {
-        state.form_fields[3].setFromSlice(notes);
-    }
+}
+
+fn fillContainerFields(
+    state: *TuiState,
+    item: schema.Item,
+    folder_field_index: usize,
+    collection_field_index: usize,
+) void {
     if (item.folderId) |folder_id| {
         for (state.session.vault_v2.folders) |folder| {
             if (std.mem.eql(u8, folder.id, folder_id)) {
-                state.form_fields[4].setFromSlice(folder.name);
+                state.form_fields[folder_field_index].setFromSlice(folder.name);
                 break;
             }
+        }
+    }
+
+    if (item.collectionIds) |collection_ids| {
+        var builder = std.ArrayList(u8){};
+        defer builder.deinit(state.allocator);
+
+        for (collection_ids) |maybe_collection_id| {
+            const collection_id = maybe_collection_id orelse continue;
+            for (state.session.vault_v2.collections) |collection| {
+                if (std.mem.eql(u8, collection.id, collection_id)) {
+                    if (builder.items.len > 0) {
+                        builder.appendSlice(state.allocator, ", ") catch return;
+                    }
+                    builder.appendSlice(state.allocator, collection.name) catch return;
+                    break;
+                }
+            }
+        }
+        if (builder.items.len > 0) {
+            state.form_fields[collection_field_index].setFromSlice(builder.items);
         }
     }
 }
@@ -985,14 +1368,33 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
         .char => switch (ev.char) {
             'q' => state.running = false,
             'n' => {
-                initItemForm(state);
+                initItemFormForType(state, .login);
+                state.form_editing_index = null;
+                state.screen = .item_form;
+            },
+            '1' => {
+                initItemFormForType(state, .login);
+                state.form_editing_index = null;
+                state.screen = .item_form;
+            },
+            '2' => {
+                initItemFormForType(state, .secure_note);
+                state.form_editing_index = null;
+                state.screen = .item_form;
+            },
+            '3' => {
+                initItemFormForType(state, .card);
+                state.form_editing_index = null;
+                state.screen = .item_form;
+            },
+            '4' => {
+                initItemFormForType(state, .identity);
                 state.form_editing_index = null;
                 state.screen = .item_form;
             },
             'e' => {
                 if (count > 0) {
                     const item = state.session.vault_v2.items[state.selected];
-                    initItemForm(state);
                     state.form_editing_index = state.selected;
                     prefillItemFormFromV2(state, item);
                     state.screen = .item_form;
@@ -1027,7 +1429,6 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
         .char => switch (ev.char) {
             'e' => {
                 const item = state.session.vault_v2.items[state.selected];
-                initItemForm(state);
                 state.form_editing_index = state.selected;
                 prefillItemFormFromV2(state, item);
                 state.screen = .item_form;
@@ -1127,7 +1528,7 @@ fn handleForm(state: *TuiState, ev: KeyEvent, is_category: bool) !void {
             state.form_fields[state.form_active_field].deleteChar();
         },
         .char => |_| {
-            if (!is_category and ev.char == 7) {
+            if (!is_category and ev.char == 7 and state.item_form_type == .login) {
                 try generatePasswordInForm(state);
                 return;
             }
@@ -1158,6 +1559,7 @@ fn handleConfirmDelete(state: *TuiState, ev: KeyEvent) !void {
 // ─── Generate password via form shortcut ────────────────────────────────────
 
 fn generatePasswordInForm(state: *TuiState) !void {
+    if (state.item_form_type != .login) return;
     if (state.wordlist) |wl| {
         const pw = try bip39.generateMnemonic(state.allocator, wl, "-");
         state.form_fields[2].clear();
