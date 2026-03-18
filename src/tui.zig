@@ -23,6 +23,7 @@ const Key = enum {
     left,
     right,
     mouse_left,
+    mouse_move,
     enter,
     escape,
     backspace,
@@ -36,6 +37,12 @@ const KeyEvent = struct {
     char: u8 = 0,
     mouse_row: u16 = 0,
     mouse_col: u16 = 0,
+};
+
+const DetailButton = enum {
+    none,
+    reveal,
+    copy,
 };
 
 // ─── Screen types ───────────────────────────────────────────────────────────
@@ -138,6 +145,7 @@ const TuiState = struct {
     item_form_type: schema.ItemType = .login,
     form_container_kind: ContainerKind = .folder,
     form_folder_pick_index: ?usize = null,
+    detail_hover_button: DetailButton = .none,
 
     // Delete confirm
     delete_target_name: []const u8 = "",
@@ -221,7 +229,7 @@ const RawMode = struct {
 };
 
 fn readKey(fd: std.posix.fd_t) ?KeyEvent {
-    var buf: [8]u8 = undefined;
+    var buf: [64]u8 = undefined;
     const n = std.posix.read(fd, &buf) catch return null;
     if (n == 0) return null;
 
@@ -238,6 +246,8 @@ fn readKey(fd: std.posix.fd_t) ?KeyEvent {
                 .{ .key = .unknown },
         };
     }
+
+    if (parseSgrMouse(buf[0..n])) |ev| return ev;
 
     // X10 mouse sequence: ESC [ M Cb Cx Cy
     if (n >= 6 and buf[0] == 27 and buf[1] == '[' and buf[2] == 'M') {
@@ -268,6 +278,58 @@ fn readKey(fd: std.posix.fd_t) ?KeyEvent {
     }
 
     return .{ .key = .unknown };
+}
+
+fn parseSgrMouse(seq: []const u8) ?KeyEvent {
+    if (seq.len < 6) return null;
+    if (!(seq[0] == 27 and seq[1] == '[' and seq[2] == '<')) return null;
+
+    var idx: usize = 3;
+    const cb = parseMouseNumber(seq, &idx) orelse return null;
+    if (idx >= seq.len or seq[idx] != ';') return null;
+    idx += 1;
+
+    const cx = parseMouseNumber(seq, &idx) orelse return null;
+    if (idx >= seq.len or seq[idx] != ';') return null;
+    idx += 1;
+
+    const cy = parseMouseNumber(seq, &idx) orelse return null;
+    if (idx >= seq.len) return null;
+    const suffix = seq[idx];
+    if (suffix != 'M' and suffix != 'm') return null;
+
+    const is_motion = (cb & 0x20) != 0;
+    const button = cb & 0x03;
+    if (is_motion) {
+        return .{
+            .key = .mouse_move,
+            .mouse_col = @intCast(cx),
+            .mouse_row = @intCast(cy),
+        };
+    }
+    if (suffix == 'M' and button == 0) {
+        return .{
+            .key = .mouse_left,
+            .mouse_col = @intCast(cx),
+            .mouse_row = @intCast(cy),
+        };
+    }
+    return .{ .key = .unknown };
+}
+
+fn parseMouseNumber(seq: []const u8, idx: *usize) ?u16 {
+    if (idx.* >= seq.len) return null;
+    var value: u32 = 0;
+    var consumed = false;
+    while (idx.* < seq.len) : (idx.* += 1) {
+        const c = seq[idx.*];
+        if (c < '0' or c > '9') break;
+        consumed = true;
+        value = value * 10 + (c - '0');
+        if (value > std.math.maxInt(u16)) return null;
+    }
+    if (!consumed) return null;
+    return @intCast(value);
 }
 
 // ─── Drawing ────────────────────────────────────────────────────────────────
@@ -412,9 +474,7 @@ fn drawItemDetail(w: *Writer, state: *const TuiState) !void {
     });
 
     try w.writeAll("\n");
-    try w.print("  {s}p{s}{s} reveal password  {s}y{s}{s} copy password{s}\n", .{
-        Color.bold, Color.reset, Color.dim, Color.bold, Color.reset, Color.dim, Color.reset,
-    });
+    try drawDetailButtons(w, state);
 }
 
 fn itemIndexAtMouseRow(state: *const TuiState, row: u16) ?usize {
@@ -431,6 +491,43 @@ fn itemIndexAtMouseRow(state: *const TuiState, row: u16) ?usize {
     const idx = state.scroll + offset;
     if (idx >= items.len) return null;
     return idx;
+}
+
+fn drawDetailButtons(w: *Writer, state: *const TuiState) !void {
+    const hovered = state.detail_hover_button;
+    try w.writeAll("  ");
+    try drawDetailButton(w, "reveal (p)", hovered == .reveal);
+    try w.writeAll("  ");
+    try drawDetailButton(w, "copy (y)", hovered == .copy);
+    try w.writeAll("\n");
+}
+
+fn drawDetailButton(w: *Writer, label: []const u8, hovered: bool) !void {
+    if (hovered) {
+        try w.print("{s}{s}[{s}]{s}", .{
+            Color.cyan, Color.underline, label, Color.reset,
+        });
+    } else {
+        try w.print("{s}[{s}]{s}", .{
+            Color.dim, label, Color.reset,
+        });
+    }
+}
+
+fn detailButtonAtMouse(row: u16, col: u16) DetailButton {
+    const button_row: u16 = 14;
+    if (row != button_row) return .none;
+
+    const reveal_text = "[reveal (p)]";
+    const copy_text = "[copy (y)]";
+    const reveal_start: u16 = 3;
+    const reveal_end: u16 = reveal_start + @as(u16, @intCast(reveal_text.len - 1));
+    const copy_start: u16 = reveal_end + 3;
+    const copy_end: u16 = copy_start + @as(u16, @intCast(copy_text.len - 1));
+
+    if (col >= reveal_start and col <= reveal_end) return .reveal;
+    if (col >= copy_start and col <= copy_end) return .copy;
+    return .none;
 }
 
 fn itemTypeLabel(item_type: u8) []const u8 {
@@ -807,7 +904,7 @@ fn drawHelp(w: *Writer, state: *const TuiState) !void {
     try w.writeAll("    Up/Down navigate, Enter detail, mouse click open, n/1 login, 2 note, 3 card, 4 identity, e edit, d delete, c categories, q quit\n");
 
     try w.print("\n  {s}Item detail{s}\n", .{ Color.cyan, Color.reset });
-    try w.writeAll("    p reveal password in message area, y copy password to clipboard\n");
+    try w.writeAll("    p reveal password, y copy password, or click [reveal]/[copy] (hover underlines)\n");
 
     try w.print("\n  {s}Item/category forms{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    Tab next field, Enter save, Esc cancel\n");
@@ -1684,10 +1781,14 @@ fn handleInput(state: *TuiState, ev: KeyEvent) !void {
 fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
     const count = state.session.vault_v2.items.len;
     switch (ev.key) {
+        .mouse_move => {
+            state.detail_hover_button = .none;
+        },
         .mouse_left => {
             if (count == 0) return;
             if (itemIndexAtMouseRow(state, ev.mouse_row)) |idx| {
                 state.selected = idx;
+                state.detail_hover_button = .none;
                 state.screen = .item_detail;
             }
         },
@@ -1698,7 +1799,10 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
             if (count > 0 and state.selected < count - 1) state.selected += 1;
         },
         .enter => {
-            if (count > 0) state.screen = .item_detail;
+            if (count > 0) {
+                state.detail_hover_button = .none;
+                state.screen = .item_detail;
+            }
         },
         .char => switch (ev.char) {
             'q' => state.running = false,
@@ -1760,12 +1864,39 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
 
 fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
     switch (ev.key) {
-        .escape => state.screen = .item_list,
+        .mouse_move => {
+            state.detail_hover_button = detailButtonAtMouse(ev.mouse_row, ev.mouse_col);
+        },
+        .mouse_left => {
+            const action = detailButtonAtMouse(ev.mouse_row, ev.mouse_col);
+            state.detail_hover_button = action;
+            switch (action) {
+                .reveal => {
+                    const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
+                    state.setMessage(pw, false);
+                },
+                .copy => {
+                    const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
+                    const copied = utils.copyToClipboard(state.allocator, pw) catch false;
+                    if (copied) {
+                        state.setMessage("Password copied to clipboard", false);
+                    } else {
+                        state.setMessage("Clipboard unavailable (pbcopy/wl-copy/xclip)", true);
+                    }
+                },
+                .none => {},
+            }
+        },
+        .escape => {
+            state.detail_hover_button = .none;
+            state.screen = .item_list;
+        },
         .char => switch (ev.char) {
             'e' => {
                 const item = state.session.vault_v2.items[state.selected];
                 state.form_editing_index = state.selected;
                 prefillItemFormFromV2(state, item);
+                state.detail_hover_button = .none;
                 state.screen = .item_form;
             },
             'd' => {
@@ -1773,6 +1904,7 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
                 state.delete_target_name = if (selected_item.name.len > 0) selected_item.name else "(unnamed)";
                 state.delete_is_category = false;
                 state.prev_screen = .item_detail;
+                state.detail_hover_button = .none;
                 state.screen = .confirm_delete;
             },
             'p' => {
@@ -1791,6 +1923,7 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
             },
             '?' => {
                 state.prev_screen = .item_detail;
+                state.detail_hover_button = .none;
                 state.screen = .help;
             },
             else => {},

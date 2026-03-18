@@ -97,8 +97,8 @@ pub const Term = struct {
     pub const cursor_show = "\x1b[?25h";
     pub const alt_screen_on = "\x1b[?1049h";
     pub const alt_screen_off = "\x1b[?1049l";
-    pub const enable_mouse = "\x1b[?1000h";
-    pub const disable_mouse = "\x1b[?1000l";
+    pub const enable_mouse = "\x1b[?1003h\x1b[?1006h";
+    pub const disable_mouse = "\x1b[?1006l\x1b[?1003l";
 
     /// Move cursor to row, col (1-indexed)
     pub fn moveTo(buf: []u8, row: u16, col: u16) []const u8 {
