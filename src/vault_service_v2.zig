@@ -19,12 +19,19 @@ pub const CreateItemInput = struct {
     collection_ids: []const []const u8 = &.{},
     login_username: ?[]const u8 = null,
     login_password: ?[]const u8 = null,
+    login_totp: ?[]const u8 = null,
+    login_uri: ?[]const u8 = null,
     secure_note_type: u8 = 0,
     card_brand: ?[]const u8 = null,
     card_number: ?[]const u8 = null,
     card_code: ?[]const u8 = null,
+    card_holder: ?[]const u8 = null,
+    card_exp_month: ?[]const u8 = null,
+    card_exp_year: ?[]const u8 = null,
     identity_email: ?[]const u8 = null,
     identity_first_name: ?[]const u8 = null,
+    identity_last_name: ?[]const u8 = null,
+    identity_phone: ?[]const u8 = null,
 };
 
 pub fn initEmptyVault(allocator: std.mem.Allocator) !schema.VaultV2 {
@@ -153,11 +160,22 @@ pub fn createItem(
 
     switch (input.type) {
         .login => {
+            var uris: ?[]schema.LoginUri = null;
+            if (input.login_uri) |uri| {
+                if (uri.len > 0) {
+                    var out = try allocator.alloc(schema.LoginUri, 1);
+                    out[0] = .{
+                        .uri = try allocator.dupe(u8, uri),
+                        .match = null,
+                    };
+                    uris = out;
+                }
+            }
             item.login = .{
-                .uris = null,
+                .uris = uris,
                 .username = if (input.login_username) |v| try allocator.dupe(u8, v) else null,
                 .password = if (input.login_password) |v| try allocator.dupe(u8, v) else null,
-                .totp = null,
+                .totp = if (input.login_totp) |v| try allocator.dupe(u8, v) else null,
                 .passwordRevisionDate = null,
                 .fido2Credentials = null,
             };
@@ -169,11 +187,11 @@ pub fn createItem(
         },
         .card => {
             item.card = .{
-                .cardholderName = null,
+                .cardholderName = if (input.card_holder) |v| try allocator.dupe(u8, v) else null,
                 .brand = if (input.card_brand) |v| try allocator.dupe(u8, v) else null,
                 .number = if (input.card_number) |v| try allocator.dupe(u8, v) else null,
-                .expMonth = null,
-                .expYear = null,
+                .expMonth = if (input.card_exp_month) |v| try allocator.dupe(u8, v) else null,
+                .expYear = if (input.card_exp_year) |v| try allocator.dupe(u8, v) else null,
                 .code = if (input.card_code) |v| try allocator.dupe(u8, v) else null,
             };
         },
@@ -182,7 +200,7 @@ pub fn createItem(
                 .title = null,
                 .firstName = if (input.identity_first_name) |v| try allocator.dupe(u8, v) else null,
                 .middleName = null,
-                .lastName = null,
+                .lastName = if (input.identity_last_name) |v| try allocator.dupe(u8, v) else null,
                 .address1 = null,
                 .address2 = null,
                 .address3 = null,
@@ -192,7 +210,7 @@ pub fn createItem(
                 .country = null,
                 .company = null,
                 .email = if (input.identity_email) |v| try allocator.dupe(u8, v) else null,
-                .phone = null,
+                .phone = if (input.identity_phone) |v| try allocator.dupe(u8, v) else null,
                 .ssn = null,
                 .username = null,
                 .passportNumber = null,
@@ -314,10 +332,33 @@ fn freeItem(allocator: std.mem.Allocator, item: *schema.Item) void {
     allocator.free(item.name);
     if (item.notes) |v| allocator.free(v);
     if (item.login) |*login| {
+        if (login.uris) |uris| {
+            for (uris) |uri| {
+                if (uri.uri) |v| allocator.free(v);
+            }
+            allocator.free(uris);
+        }
         if (login.username) |v| allocator.free(v);
         if (login.password) |v| allocator.free(v);
         if (login.totp) |v| allocator.free(v);
         if (login.passwordRevisionDate) |v| allocator.free(v);
+        if (login.fido2Credentials) |credentials| {
+            for (credentials) |credential| {
+                if (credential.credentialId) |v| allocator.free(v);
+                if (credential.keyType) |v| allocator.free(v);
+                if (credential.keyAlgorithm) |v| allocator.free(v);
+                if (credential.keyCurve) |v| allocator.free(v);
+                if (credential.keyValue) |v| allocator.free(v);
+                if (credential.rpId) |v| allocator.free(v);
+                if (credential.rpName) |v| allocator.free(v);
+                if (credential.userHandle) |v| allocator.free(v);
+                if (credential.userName) |v| allocator.free(v);
+                if (credential.userDisplayName) |v| allocator.free(v);
+                if (credential.discoverable) |v| allocator.free(v);
+                if (credential.creationDate) |v| allocator.free(v);
+            }
+            allocator.free(credentials);
+        }
     }
     if (item.card) |*card| {
         if (card.brand) |v| allocator.free(v);
@@ -376,12 +417,18 @@ test "folder and login CRUD on v2 vault" {
         .folder_id = vault.folders[0].id,
         .login_username = "dev@example.com",
         .login_password = "pw",
+        .login_totp = "ABC123",
+        .login_uri = "https://github.com",
     });
 
     try std.testing.expectEqual(@as(usize, 1), vault.folders.len);
     try std.testing.expectEqual(@as(usize, 1), vault.items.len);
     try std.testing.expect(vault.items[0].login != null);
     try std.testing.expectEqualStrings("dev@example.com", vault.items[0].login.?.username.?);
+    try std.testing.expectEqualStrings("ABC123", vault.items[0].login.?.totp.?);
+    try std.testing.expect(vault.items[0].login.?.uris != null);
+    try std.testing.expectEqual(@as(usize, 1), vault.items[0].login.?.uris.?.len);
+    try std.testing.expectEqualStrings("https://github.com", vault.items[0].login.?.uris.?[0].uri.?);
 
     try updateLoginCredentials(allocator, &vault, item_id, "new@example.com", "newpw");
     try std.testing.expectEqualStrings("newpw", vault.items[0].login.?.password.?);
@@ -410,6 +457,9 @@ test "collection and typed item creation on v2 vault" {
         .card_brand = "visa",
         .card_number = "4111111111111111",
         .card_code = "123",
+        .card_holder = "John Dev",
+        .card_exp_month = "10",
+        .card_exp_year = "2030",
     });
 
     try std.testing.expectEqual(@as(usize, 1), vault.collections.len);
@@ -417,6 +467,8 @@ test "collection and typed item creation on v2 vault" {
     try std.testing.expect(vault.items[0].secureNote != null);
     try std.testing.expect(vault.items[1].card != null);
     try std.testing.expectEqualStrings("4111111111111111", vault.items[1].card.?.number.?);
+    try std.testing.expectEqualStrings("John Dev", vault.items[1].card.?.cardholderName.?);
+    try std.testing.expectEqualStrings("10", vault.items[1].card.?.expMonth.?);
 }
 
 test "updateLoginCredentials rejects non-login item" {
