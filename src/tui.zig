@@ -22,6 +22,7 @@ const Key = enum {
     down,
     left,
     right,
+    mouse_left,
     enter,
     escape,
     backspace,
@@ -33,6 +34,8 @@ const Key = enum {
 const KeyEvent = struct {
     key: Key,
     char: u8 = 0,
+    mouse_row: u16 = 0,
+    mouse_col: u16 = 0,
 };
 
 // ─── Screen types ───────────────────────────────────────────────────────────
@@ -236,6 +239,23 @@ fn readKey(fd: std.posix.fd_t) ?KeyEvent {
         };
     }
 
+    // X10 mouse sequence: ESC [ M Cb Cx Cy
+    if (n >= 6 and buf[0] == 27 and buf[1] == '[' and buf[2] == 'M') {
+        if (buf[3] < 32 or buf[4] < 32 or buf[5] < 32) return .{ .key = .unknown };
+        const cb: u8 = buf[3] - 32;
+        const cx: u16 = @as(u16, buf[4] - 32);
+        const cy: u16 = @as(u16, buf[5] - 32);
+        const button = cb & 0x03;
+        if (button == 0) {
+            return .{
+                .key = .mouse_left,
+                .mouse_col = cx,
+                .mouse_row = cy,
+            };
+        }
+        return .{ .key = .unknown };
+    }
+
     // Escape sequences
     if (n >= 3 and buf[0] == 27 and buf[1] == '[') {
         return switch (buf[2]) {
@@ -395,6 +415,22 @@ fn drawItemDetail(w: *Writer, state: *const TuiState) !void {
     try w.print("  {s}p{s}{s} reveal password  {s}y{s}{s} copy password{s}\n", .{
         Color.bold, Color.reset, Color.dim, Color.bold, Color.reset, Color.dim, Color.reset,
     });
+}
+
+fn itemIndexAtMouseRow(state: *const TuiState, row: u16) ?usize {
+    const items = state.session.vault_v2.items;
+    if (items.len == 0) return null;
+
+    // Header uses 2 lines, item list adds one leading blank line.
+    const first_item_row: u16 = 4;
+    if (row < first_item_row) return null;
+
+    const offset: usize = @as(usize, row - first_item_row);
+    if (offset >= state.visibleItems()) return null;
+
+    const idx = state.scroll + offset;
+    if (idx >= items.len) return null;
+    return idx;
 }
 
 fn itemTypeLabel(item_type: u8) []const u8 {
@@ -768,7 +804,7 @@ fn drawHelp(w: *Writer, state: *const TuiState) !void {
     try w.print("{s}\n\n", .{Color.reset});
 
     try w.print("  {s}Item list{s}\n", .{ Color.cyan, Color.reset });
-    try w.writeAll("    Up/Down navigate, Enter detail, n/1 login, 2 note, 3 card, 4 identity, e edit, d delete, c categories, q quit\n");
+    try w.writeAll("    Up/Down navigate, Enter detail, mouse click open, n/1 login, 2 note, 3 card, 4 identity, e edit, d delete, c categories, q quit\n");
 
     try w.print("\n  {s}Item detail{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    p reveal password in message area, y copy password to clipboard\n");
@@ -1648,6 +1684,13 @@ fn handleInput(state: *TuiState, ev: KeyEvent) !void {
 fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
     const count = state.session.vault_v2.items.len;
     switch (ev.key) {
+        .mouse_left => {
+            if (count == 0) return;
+            if (itemIndexAtMouseRow(state, ev.mouse_row)) |idx| {
+                state.selected = idx;
+                state.screen = .item_detail;
+            }
+        },
         .up => {
             if (state.selected > 0) state.selected -= 1;
         },
@@ -2003,9 +2046,11 @@ pub fn run(allocator: std.mem.Allocator, session: *VaultSession) !void {
 
     try w.writeAll(Term.alt_screen_on);
     try w.writeAll(Term.cursor_hide);
+    try w.writeAll(Term.enable_mouse);
     try w.flush();
 
     defer {
+        w.writeAll(Term.disable_mouse) catch {};
         w.writeAll(Term.cursor_show) catch {};
         w.writeAll(Term.alt_screen_off) catch {};
         w.flush() catch {};
