@@ -1,40 +1,34 @@
-# entropy
+# Entropy
 
-Terminal password manager written in Zig.
+Encrypted terminal password manager built with Zig.
 
-## Current status
+## Install
 
-This repository contains the active encrypted vault + TUI application in `src/`.
+Install globally with one command:
 
-The only active entrypoint for the application is:
+```bash
+curl -fsSL https://raw.githubusercontent.com/lag0nia/entropy/main/scripts/install.sh | bash
+```
 
-- `src/main.zig`
+What it does:
 
-## Architecture
+1. Installs system dependencies (`git`, `curl`, `xz-utils`, `build-essential`, `libsodium-dev`).
+2. Installs Zig `0.15.2` in `/opt/zig`.
+3. Clones the source in `/opt/entropy/src`.
+4. Builds the app in release mode.
+5. Installs global command `entropy` in `/usr/local/bin/entropy`.
 
-The active app is split into these modules:
+## Update
 
-- `src/main.zig`: bootstrap, vault creation/unlock flow, launches TUI.
-- `src/tui.zig`: terminal UI state machine and CRUD interactions.
-- `src/vault_service.zig`: business logic for item/category CRUD and invariants.
-- `src/schema_v2.zig`: v2 migration schema for 1:1 Bitwarden JSON compatibility.
-- `src/relations_v2.zig`: normalized v2 container relations (`item-folder`, `item-collection`) and integrity checks.
-- `src/storage.zig`: encrypted vault persistence (JSON wrapper on disk).
-- `src/crypto.zig`: libsodium wrappers (Argon2id + XChaCha20-Poly1305).
-- `src/model.zig`: core entities (`Vault`, `Item`, `Category`) and helpers.
-- `src/bip39.zig`: BIP-39 mnemonic generation for passwords.
-- `src/utils.zig`: terminal helpers (colors, raw input, hidden password input).
+Update globally from anywhere:
 
-## Vault flow
+```bash
+curl -fsSL https://raw.githubusercontent.com/lag0nia/entropy/main/scripts/update.sh | bash
+```
 
-1. Resolve vault path: `~/.config/enthropy/vault.enc`
-2. If exists: prompt for master password and decrypt.
-3. If not exists: create a new vault and encrypt it.
-4. Run TUI loop and persist after CRUD changes.
+This pulls latest code, rebuilds, and replaces the global binary.
 
-## Build and run
-
-Requires Zig `0.15.2` and `libsodium` available in the system.
+## Local development
 
 ```bash
 zig build
@@ -45,10 +39,11 @@ zig build test
 ## Bitwarden import
 
 ```bash
-enthropy import bitwarden --file /path/to/bitwarden.json --mode strict --replace
-enthropy import bitwarden --file /path/to/bitwarden.json --mode best_effort --dry-run --merge
+entropy import bitwarden --file /path/to/bitwarden.json --mode strict --replace
+entropy import bitwarden --file /path/to/bitwarden.json --mode best_effort --dry-run --merge
 ```
 
 ## Notes
 
+- Vault path: `~/.config/enthropy/vault.enc`
 - `english.txt` is the BIP-39 English wordlist used for password generation.
