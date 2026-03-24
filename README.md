@@ -20,21 +20,39 @@ What it does:
 
 ## Update
 
-Update globally from anywhere:
+You can update in two ways.
+
+With curl:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lag0nia/entropy/main/scripts/update.sh | bash
 ```
 
-This pulls latest code, rebuilds, and replaces the global binary.
+With internal command:
+
+```bash
+entropy update
+```
+
+Both options pull latest code, rebuild, and replace the global binary.
 
 ## Uninstall
 
-Uninstall global binary and install files while preserving your vault by default:
+You can uninstall in two ways.
+
+With curl:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lag0nia/entropy/main/scripts/uninstall.sh | bash
 ```
+
+With internal command:
+
+```bash
+entropy uninstall
+```
+
+Both options remove global binary and install files while preserving your vault by default.
 
 Optional flags:
 
@@ -54,6 +72,15 @@ curl -fsSL https://raw.githubusercontent.com/lag0nia/entropy/main/scripts/uninst
 zig build
 zig build run
 zig build test
+```
+
+## CLI commands
+
+```bash
+entropy help
+entropy update
+entropy uninstall [--purge-vault] [--remove-zig]
+entropy import bitwarden --file /path/to/bitwarden.json --mode strict --replace
 ```
 
 ## Bitwarden import

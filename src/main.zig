@@ -30,6 +30,13 @@ pub fn main() !void {
         args[i] = arg;
     }
 
+    if (handleMaintenanceCommand(allocator, args) catch |err| {
+        std.debug.print("Error: command failed ({})\n", .{err});
+        return;
+    }) {
+        return;
+    }
+
     var import_cmd: ?import_bitwarden.CliOptions = null;
     if (import_bitwarden.parseImportCommand(args)) |maybe_import| {
         if (maybe_import) |cmd| {
@@ -251,6 +258,98 @@ pub fn main() !void {
     };
 }
 
+const ScriptError = error{
+    ScriptNotFound,
+    ScriptFailed,
+};
+
+fn handleMaintenanceCommand(allocator: std.mem.Allocator, args: []const []const u8) !bool {
+    if (args.len < 2) return false;
+
+    if (std.mem.eql(u8, args[1], "update")) {
+        try runMaintenanceScript(allocator, "update.sh", args[2..]);
+        return true;
+    }
+    if (std.mem.eql(u8, args[1], "uninstall")) {
+        try runMaintenanceScript(allocator, "uninstall.sh", args[2..]);
+        return true;
+    }
+    if (std.mem.eql(u8, args[1], "install")) {
+        std.debug.print(
+            "Install must run via bootstrap script:\n  curl -fsSL https://raw.githubusercontent.com/lag0nia/entropy/main/scripts/install.sh | bash\n",
+            .{},
+        );
+        return true;
+    }
+    if (std.mem.eql(u8, args[1], "help") or std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h")) {
+        printCliUsage();
+        return true;
+    }
+    return false;
+}
+
+fn runMaintenanceScript(
+    allocator: std.mem.Allocator,
+    script_name: []const u8,
+    passthrough_args: []const []const u8,
+) !void {
+    const script_path = try resolveScriptPath(allocator, script_name);
+    defer allocator.free(script_path);
+
+    var argv = std.ArrayList([]const u8){};
+    defer argv.deinit(allocator);
+    try argv.append(allocator, "bash");
+    try argv.append(allocator, script_path);
+    try argv.appendSlice(allocator, passthrough_args);
+
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+
+    try child.spawn();
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| if (code != 0) return ScriptError.ScriptFailed,
+        else => return ScriptError.ScriptFailed,
+    }
+}
+
+fn resolveScriptPath(allocator: std.mem.Allocator, script_name: []const u8) ![]u8 {
+    const env_scripts_dir = std.process.getEnvVarOwned(allocator, "ENTROPY_SCRIPTS_DIR") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    defer if (env_scripts_dir) |dir| allocator.free(dir);
+
+    if (env_scripts_dir) |dir| {
+        const script_path = try std.fs.path.join(allocator, &.{ dir, script_name });
+        if (pathExists(script_path)) return script_path;
+        allocator.free(script_path);
+    }
+
+    const defaults = [_][]const u8{
+        "/opt/entropy/src/scripts",
+        "scripts",
+    };
+    for (defaults) |dir| {
+        const script_path = try std.fs.path.join(allocator, &.{ dir, script_name });
+        if (pathExists(script_path)) return script_path;
+        allocator.free(script_path);
+    }
+
+    std.debug.print(
+        "Error: could not find {s}. Looked in ENTROPY_SCRIPTS_DIR, /opt/entropy/src/scripts and ./scripts.\n",
+        .{script_name},
+    );
+    return ScriptError.ScriptNotFound;
+}
+
+fn pathExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
 fn printBanner(w: *std.Io.Writer) !void {
     try w.print("\n", .{});
     try w.print("{s}{s}", .{ Color.bright_cyan, Color.bold });
@@ -274,7 +373,24 @@ fn printBanner(w: *std.Io.Writer) !void {
 fn printImportUsage() void {
     std.debug.print(
         \\Usage:
-        \\  enthropy import bitwarden --file <path> [--mode strict|best_effort] [--dry-run] [--replace|--merge]
+        \\  entropy import bitwarden --file <path> [--mode strict|best_effort] [--dry-run] [--replace|--merge]
+        \\
+    , .{});
+}
+
+fn printCliUsage() void {
+    std.debug.print(
+        \\Usage:
+        \\  entropy
+        \\  entropy import bitwarden --file <path> [--mode strict|best_effort] [--dry-run] [--replace|--merge]
+        \\  entropy update
+        \\  entropy uninstall [--purge-vault] [--remove-zig]
+        \\  entropy help
+        \\
+        \\Notes:
+        \\  - install uses bootstrap script:
+        \\    curl -fsSL https://raw.githubusercontent.com/lag0nia/entropy/main/scripts/install.sh | bash
+        \\  - update/uninstall run scripts from ENTROPY_SCRIPTS_DIR, /opt/entropy/src/scripts or ./scripts
         \\
     , .{});
 }
