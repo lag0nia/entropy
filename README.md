@@ -28,6 +28,26 @@ curl -fsSL https://raw.githubusercontent.com/lag0nia/entropy/main/scripts/update
 
 This pulls latest code, rebuilds, and replaces the global binary.
 
+## Uninstall
+
+Uninstall global binary and install files while preserving your vault by default:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lag0nia/entropy/main/scripts/uninstall.sh | bash
+```
+
+Optional flags:
+
+- `--purge-vault`: remove `~/.config/enthropy/vault.enc` too.
+- `--remove-zig`: remove `/opt/zig` and `/usr/local/bin/zig`.
+
+Examples:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lag0nia/entropy/main/scripts/uninstall.sh | bash -s -- --remove-zig
+curl -fsSL https://raw.githubusercontent.com/lag0nia/entropy/main/scripts/uninstall.sh | bash -s -- --purge-vault --remove-zig
+```
+
 ## Local development
 
 ```bash
