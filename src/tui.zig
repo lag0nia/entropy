@@ -27,6 +27,7 @@ const Key = enum {
     enter,
     escape,
     backspace,
+    clear_line,
     tab,
     char,
     unknown,
@@ -43,6 +44,41 @@ const DetailButton = enum {
     none,
     reveal,
     copy,
+    generate,
+};
+
+const DetailField = enum {
+    name,
+    user,
+    password,
+    totp,
+    url,
+    notes,
+    folder,
+    collections,
+    org_id,
+    note_type,
+    number,
+    brand,
+    code,
+    holder,
+    exp_month,
+    exp_year,
+    first_name,
+    last_name,
+    email,
+    phone,
+};
+
+const DetailFieldRow = struct {
+    row: u16,
+    field: DetailField,
+};
+
+const DetailPopoverKind = enum {
+    none,
+    folder,
+    collections,
 };
 
 // ─── Screen types ───────────────────────────────────────────────────────────
@@ -146,7 +182,22 @@ const TuiState = struct {
     item_form_type: schema.ItemType = .login,
     form_container_kind: ContainerKind = .folder,
     form_folder_pick_index: ?usize = null,
+    form_password_revealed: bool = false,
     detail_hover_button: DetailButton = .none,
+    detail_hover_field: ?DetailField = null,
+    detail_edit_field: ?DetailField = null,
+    detail_edit_buffer: InputField = .{ .label = "" },
+    detail_password_confirm_pending: bool = false,
+    detail_password_reveal_until_ns: ?i128 = null,
+    detail_folder_pick_index: ?usize = null,
+    detail_collection_pick_index: ?usize = null,
+    detail_collection_selection: ?[]bool = null,
+    detail_field_rows: [32]DetailFieldRow = undefined,
+    detail_field_row_count: usize = 0,
+    detail_buttons_row: u16 = 0,
+    detail_popover_kind: DetailPopoverKind = .none,
+    detail_popover_row_start: u16 = 0,
+    detail_popover_count: usize = 0,
 
     // Delete confirm
     delete_target_name: []const u8 = "",
@@ -195,6 +246,11 @@ const TuiState = struct {
                 self.clearMessage();
             }
         }
+        if (self.detail_password_reveal_until_ns) |deadline| {
+            if (std.time.nanoTimestamp() >= deadline) {
+                self.detail_password_reveal_until_ns = null;
+            }
+        }
     }
 
     fn visibleItems(self: *const TuiState) usize {
@@ -206,6 +262,25 @@ const TuiState = struct {
             return self.session.vault_v2.folders.len + self.session.vault_v2.collections.len;
         }
         return self.session.vault_v2.items.len;
+    }
+
+    fn clearDetailCollectionSelection(self: *TuiState) void {
+        if (self.detail_collection_selection) |slice| {
+            self.allocator.free(slice);
+            self.detail_collection_selection = null;
+        }
+    }
+
+    fn clearDetailEditState(self: *TuiState) void {
+        self.detail_edit_field = null;
+        self.detail_edit_buffer.clear();
+        self.detail_password_confirm_pending = false;
+        self.detail_folder_pick_index = null;
+        self.detail_collection_pick_index = null;
+        self.clearDetailCollectionSelection();
+        self.detail_popover_kind = .none;
+        self.detail_popover_row_start = 0;
+        self.detail_popover_count = 0;
     }
 };
 
@@ -256,13 +331,20 @@ fn readKey(fd: std.posix.fd_t) ?KeyEvent {
             27 => .{ .key = .escape },
             13, 10 => .{ .key = .enter },
             127, 8 => .{ .key = .backspace },
+            21 => .{ .key = .clear_line }, // Ctrl+U (terminal fallback)
             9 => .{ .key = .tab },
             7 => .{ .key = .char, .char = 7 }, // Ctrl+G
+            20 => .{ .key = .char, .char = 20 }, // Ctrl+T
             else => |c| if (c >= 32 and c < 127)
                 .{ .key = .char, .char = c }
             else
                 .{ .key = .unknown },
         };
+    }
+
+    // Common encoding for Cmd/Alt+Backspace in some terminals: ESC + DEL/BS
+    if (n == 2 and buf[0] == 27 and (buf[1] == 127 or buf[1] == 8)) {
+        return .{ .key = .clear_line };
     }
 
     if (parseSgrMouse(buf[0..n])) |ev| return ev;
@@ -444,55 +526,68 @@ fn drawItemList(w: *Writer, state: *TuiState) !void {
     try w.writeAll("\n");
 }
 
-fn drawItemDetail(w: *Writer, state: *const TuiState) !void {
+fn drawItemDetail(w: *Writer, state: *TuiState) !void {
     const items = state.session.vault_v2.items;
     if (state.selected >= items.len) return;
     const item = items[state.selected];
 
+    state.detail_field_row_count = 0;
+    state.detail_popover_kind = .none;
+    state.detail_popover_row_start = 0;
+    state.detail_popover_count = 0;
+    state.detail_buttons_row = 0;
+
     try w.writeAll("\n");
-    try w.print("  {s}{s}Item Detail{s}\n", .{ Color.bold, Color.bright_white, Color.reset });
+    try w.print("  {s}{s}Item Detail{s} {s}[{s}]{s}\n", .{
+        Color.bold,
+        Color.bright_white,
+        Color.reset,
+        Color.dim,
+        itemTypeLabel(item.type),
+        Color.reset,
+    });
     try w.print("  {s}", .{Color.bright_black});
-    var i: usize = 0;
-    while (i < @min(state.cols -| 4, 50)) : (i += 1) {
+    var sep_i: usize = 0;
+    while (sep_i < @min(state.cols -| 4, 50)) : (sep_i += 1) {
         try w.writeAll(Box.horizontal);
     }
     try w.print("{s}\n\n", .{Color.reset});
 
-    // Name
-    try w.print("  {s}Name:{s}     {s}\n", .{
-        Color.cyan, Color.reset, if (item.name.len > 0) item.name else "(none)",
-    });
-
-    // Type
-    try w.print("  {s}Type:{s}     {s}\n", .{
-        Color.cyan, Color.reset, itemTypeLabel(item.type),
-    });
-
-    // Username/email
-    try w.print("  {s}User:{s}     {s}\n", .{
-        Color.cyan, Color.reset, itemPrimaryIdentifier(item) orelse "(none)",
-    });
-
-    // Password (masked)
-    try w.print("  {s}Password:{s} {s}", .{ Color.cyan, Color.reset, Color.dim });
-    const secret = itemPrimarySecret(item);
-    for (secret) |_| {
-        try w.writeAll(Icon.dot);
+    var row: u16 = 7;
+    const fields = detailFieldsForItemType(item.type);
+    for (fields) |field| {
+        try drawDetailFieldLine(w, state, item, row, field);
+        row += 1;
     }
-    try w.print("{s}\n", .{Color.reset});
 
-    // Notes
-    try w.print("  {s}Notes:{s}    {s}\n", .{
-        Color.cyan, Color.reset, item.notes orelse "(none)",
-    });
+    if (state.detail_password_confirm_pending) {
+        try w.writeAll("\n");
+        try w.print("  {s}Replace stored password?{s} press {s}y{s}{s} to confirm or {s}n{s}{s} to cancel\n", .{
+            Color.yellow, Color.reset,
+            Color.bold, Color.reset, Color.dim,
+            Color.bold, Color.reset, Color.dim,
+        });
+        row += 2;
+    }
 
-    // Container
-    try w.print("  {s}Container:{s} {s}\n", .{
-        Color.cyan, Color.reset, resolveContainerLabel(state, item) orelse "(none)",
-    });
+    if (state.detail_edit_field) |field| {
+        switch (field) {
+            .folder => {
+                row += 1;
+                try drawFolderInlinePopover(w, state, row);
+                row += @as(u16, @intCast(state.session.vault_v2.folders.len + 2));
+            },
+            .collections => {
+                row += 1;
+                try drawCollectionsInlinePopover(w, state, row);
+                row += @as(u16, @intCast(state.session.vault_v2.collections.len + 1));
+            },
+            else => {},
+        }
+    }
 
     try w.writeAll("\n");
-    try drawDetailButtons(w, state);
+    try drawDetailButtons(w, state, row + 1);
 }
 
 fn itemIndexAtMouseRow(state: *const TuiState, row: u16) ?usize {
@@ -511,12 +606,17 @@ fn itemIndexAtMouseRow(state: *const TuiState, row: u16) ?usize {
     return idx;
 }
 
-fn drawDetailButtons(w: *Writer, state: *const TuiState) !void {
+fn drawDetailButtons(w: *Writer, state: *TuiState, row: u16) !void {
+    state.detail_buttons_row = row;
     const hovered = state.detail_hover_button;
     try w.writeAll("  ");
     try drawDetailButton(w, "reveal (p)", hovered == .reveal);
     try w.writeAll("  ");
     try drawDetailButton(w, "copy (y)", hovered == .copy);
+    if (state.detail_edit_field != null and state.detail_edit_field.? == .password) {
+        try w.writeAll("  ");
+        try drawDetailButton(w, "generate (ctrl+g)", hovered == .generate);
+    }
     try w.writeAll("\n");
 }
 
@@ -532,20 +632,262 @@ fn drawDetailButton(w: *Writer, label: []const u8, hovered: bool) !void {
     }
 }
 
-fn detailButtonAtMouse(row: u16, col: u16) DetailButton {
-    const button_row: u16 = 14;
-    if (row != button_row) return .none;
+fn detailButtonAtMouse(state: *const TuiState, row: u16, col: u16) DetailButton {
+    if (row != state.detail_buttons_row) return .none;
 
     const reveal_text = "[reveal (p)]";
     const copy_text = "[copy (y)]";
+    const generate_text = "[generate (ctrl+g)]";
     const reveal_start: u16 = 3;
     const reveal_end: u16 = reveal_start + @as(u16, @intCast(reveal_text.len - 1));
     const copy_start: u16 = reveal_end + 3;
     const copy_end: u16 = copy_start + @as(u16, @intCast(copy_text.len - 1));
+    const generate_start: u16 = copy_end + 3;
+    const generate_end: u16 = generate_start + @as(u16, @intCast(generate_text.len - 1));
 
     if (col >= reveal_start and col <= reveal_end) return .reveal;
     if (col >= copy_start and col <= copy_end) return .copy;
+    if (state.detail_edit_field != null and state.detail_edit_field.? == .password and col >= generate_start and col <= generate_end) {
+        return .generate;
+    }
     return .none;
+}
+
+fn detailFieldsForItemType(item_type: u8) []const DetailField {
+    return switch (item_type) {
+        2 => &.{ .name, .note_type, .notes, .folder, .collections, .org_id },
+        3 => &.{ .name, .number, .brand, .code, .holder, .exp_month, .exp_year, .notes, .folder, .collections, .org_id },
+        4 => &.{ .name, .first_name, .last_name, .email, .phone, .notes, .folder, .collections, .org_id },
+        else => &.{ .name, .user, .password, .totp, .url, .notes, .folder, .collections, .org_id },
+    };
+}
+
+fn detailFieldLabel(field: DetailField) []const u8 {
+    return switch (field) {
+        .name => "Name",
+        .user => "User",
+        .password => "Password",
+        .totp => "TOTP",
+        .url => "URL",
+        .notes => "Notes",
+        .folder => "Folder",
+        .collections => "Collections",
+        .org_id => "Org ID",
+        .note_type => "NoteType",
+        .number => "Number",
+        .brand => "Brand",
+        .code => "Code",
+        .holder => "Holder",
+        .exp_month => "ExpMonth",
+        .exp_year => "ExpYear",
+        .first_name => "FirstName",
+        .last_name => "LastName",
+        .email => "Email",
+        .phone => "Phone",
+    };
+}
+
+fn drawDetailFieldLine(
+    w: *Writer,
+    state: *TuiState,
+    item: schema.Item,
+    row: u16,
+    field: DetailField,
+) !void {
+    if (state.detail_field_row_count < state.detail_field_rows.len) {
+        state.detail_field_rows[state.detail_field_row_count] = .{ .row = row, .field = field };
+        state.detail_field_row_count += 1;
+    }
+
+    const is_editing = (state.detail_edit_field != null and state.detail_edit_field.? == field);
+    const is_hovered = (state.detail_hover_field != null and state.detail_hover_field.? == field and !is_editing);
+
+    try w.print("  {s}{s:<12}{s} ", .{
+        if (is_editing) Color.bold else Color.cyan,
+        detailFieldLabel(field),
+        Color.reset,
+    });
+
+    if (is_editing) {
+        try drawDetailEditingValue(w, state, field);
+    } else {
+        try drawDetailStaticValue(w, state, item, field, is_hovered);
+    }
+    try w.writeAll("\n");
+}
+
+fn drawDetailStaticValue(
+    w: *Writer,
+    state: *const TuiState,
+    item: schema.Item,
+    field: DetailField,
+    hovered: bool,
+) !void {
+    if (hovered) try w.writeAll(Color.underline);
+    if (hovered) try w.writeAll(Color.bright_white) else try w.writeAll(Color.reset);
+
+    switch (field) {
+        .password => {
+            const pw = if (item.login) |login| login.password orelse "" else "";
+            if (pw.len == 0) {
+                try w.writeAll("(none)");
+            } else {
+                const revealed = if (state.detail_password_reveal_until_ns) |deadline|
+                    std.time.nanoTimestamp() < deadline
+                else
+                    false;
+                if (revealed) {
+                    try w.writeAll(pw);
+                } else {
+                    for (pw) |_| try w.writeAll(Icon.dot);
+                }
+            }
+        },
+        .folder => {
+            try w.writeAll(resolveFolderNameByItem(state, item) orelse "(none)");
+        },
+        .collections => {
+            try writeCollectionNamesFromItem(w, state, item);
+        },
+        .name => try w.writeAll(if (item.name.len > 0) item.name else "(none)"),
+        .user => try w.writeAll(if (item.login != null and item.login.?.username != null) item.login.?.username.? else "(none)"),
+        .totp => try w.writeAll(if (item.login != null and item.login.?.totp != null) item.login.?.totp.? else "(none)"),
+        .url => {
+            if (item.login) |login| {
+                if (login.uris) |uris| {
+                    if (uris.len > 0 and uris[0].uri != null) {
+                        try w.writeAll(uris[0].uri.?);
+                    } else try w.writeAll("(none)");
+                } else try w.writeAll("(none)");
+            } else try w.writeAll("(none)");
+        },
+        .notes => try w.writeAll(item.notes orelse "(none)"),
+        .org_id => try w.writeAll(item.organizationId orelse "(none)"),
+        .note_type => {
+            if (item.secureNote != null and item.secureNote.?.type != null) {
+                try w.print("{d}", .{item.secureNote.?.type.?});
+            } else {
+                try w.writeAll("(none)");
+            }
+        },
+        .number => try w.writeAll(if (item.card != null and item.card.?.number != null) item.card.?.number.? else "(none)"),
+        .brand => try w.writeAll(if (item.card != null and item.card.?.brand != null) item.card.?.brand.? else "(none)"),
+        .code => try w.writeAll(if (item.card != null and item.card.?.code != null) item.card.?.code.? else "(none)"),
+        .holder => try w.writeAll(if (item.card != null and item.card.?.cardholderName != null) item.card.?.cardholderName.? else "(none)"),
+        .exp_month => try w.writeAll(if (item.card != null and item.card.?.expMonth != null) item.card.?.expMonth.? else "(none)"),
+        .exp_year => try w.writeAll(if (item.card != null and item.card.?.expYear != null) item.card.?.expYear.? else "(none)"),
+        .first_name => try w.writeAll(if (item.identity != null and item.identity.?.firstName != null) item.identity.?.firstName.? else "(none)"),
+        .last_name => try w.writeAll(if (item.identity != null and item.identity.?.lastName != null) item.identity.?.lastName.? else "(none)"),
+        .email => try w.writeAll(if (item.identity != null and item.identity.?.email != null) item.identity.?.email.? else "(none)"),
+        .phone => try w.writeAll(if (item.identity != null and item.identity.?.phone != null) item.identity.?.phone.? else "(none)"),
+    }
+    try w.writeAll(Color.reset);
+}
+
+fn drawDetailEditingValue(w: *Writer, state: *const TuiState, field: DetailField) !void {
+    try w.writeAll(Color.underline);
+    try w.writeAll(Color.bright_white);
+    switch (field) {
+        .folder => {
+            try w.writeAll(currentDetailFolderName(state) orelse "(none)");
+        },
+        .collections => {
+            try writeCurrentDetailCollectionNames(w, state);
+        },
+        .password => {
+            const pw = state.detail_edit_buffer.slice();
+            for (pw) |_| try w.writeAll(Icon.dot);
+        },
+        else => {
+            try w.writeAll(state.detail_edit_buffer.slice());
+        },
+    }
+    try w.writeAll(Color.reset);
+    try w.writeAll(Color.bright_black);
+    try w.writeAll("_");
+    try w.writeAll(Color.reset);
+}
+
+fn drawFolderInlinePopover(w: *Writer, state: *TuiState, start_row: u16) !void {
+    state.detail_popover_kind = .folder;
+    state.detail_popover_row_start = start_row + 1;
+    state.detail_popover_count = state.session.vault_v2.folders.len + 1;
+
+    try w.print("  {s}Folders (Up/Down, Enter save, Esc cancel):{s}\n", .{
+        Color.dim, Color.reset,
+    });
+
+    const none_selected = state.detail_folder_pick_index == null;
+    if (none_selected) {
+        try w.print("    {s}> [none]{s}\n", .{ Color.cyan, Color.reset });
+    } else {
+        try w.writeAll("      [none]\n");
+    }
+
+    for (state.session.vault_v2.folders, 0..) |folder, idx| {
+        const selected = state.detail_folder_pick_index != null and state.detail_folder_pick_index.? == idx;
+        if (selected) {
+            try w.print("    {s}> {s}{s}{s}\n", .{ Color.cyan, Color.bold, folder.name, Color.reset });
+        } else {
+            try w.print("      {s}\n", .{folder.name});
+        }
+    }
+}
+
+fn drawCollectionsInlinePopover(w: *Writer, state: *TuiState, start_row: u16) !void {
+    state.detail_popover_kind = .collections;
+    state.detail_popover_row_start = start_row + 1;
+    state.detail_popover_count = state.session.vault_v2.collections.len;
+
+    try w.print("  {s}Collections (click/Up/Down, Space toggle, Enter save):{s}\n", .{
+        Color.dim, Color.reset,
+    });
+
+    const selected_flags = state.detail_collection_selection orelse {
+        try w.print("    {s}(none){s}\n", .{ Color.dim, Color.reset });
+        return;
+    };
+
+    if (state.session.vault_v2.collections.len == 0) {
+        try w.print("    {s}(no collections){s}\n", .{ Color.dim, Color.reset });
+        return;
+    }
+
+    for (state.session.vault_v2.collections, 0..) |collection, idx| {
+        const cursor = state.detail_collection_pick_index != null and state.detail_collection_pick_index.? == idx;
+        const marked = selected_flags[idx];
+        if (cursor) {
+            try w.print("    {s}> [{s}] {s}{s}{s}\n", .{
+                Color.cyan,
+                if (marked) "x" else " ",
+                Color.bold,
+                collection.name,
+                Color.reset,
+            });
+        } else {
+            try w.print("      [{s}] {s}\n", .{
+                if (marked) "x" else " ",
+                collection.name,
+            });
+        }
+    }
+}
+
+fn detailFieldAtMouse(state: *const TuiState, row: u16, col: u16) ?DetailField {
+    if (col < 3) return null;
+    for (0..state.detail_field_row_count) |i| {
+        const entry = state.detail_field_rows[i];
+        if (entry.row == row) return entry.field;
+    }
+    return null;
+}
+
+fn detailPopoverOptionAtMouse(state: *const TuiState, row: u16) ?usize {
+    if (state.detail_popover_kind == .none) return null;
+    if (row < state.detail_popover_row_start) return null;
+    const offset = @as(usize, row - state.detail_popover_row_start);
+    if (offset >= state.detail_popover_count) return null;
+    return offset;
 }
 
 fn itemTypeLabel(item_type: u8) []const u8 {
@@ -597,6 +939,58 @@ fn resolveContainerLabel(state: *const TuiState, item: schema.Item) ?[]const u8 
         }
     }
     return null;
+}
+
+fn resolveFolderNameByItem(state: *const TuiState, item: schema.Item) ?[]const u8 {
+    if (item.folderId) |folder_id| {
+        for (state.session.vault_v2.folders) |folder| {
+            if (std.mem.eql(u8, folder.id, folder_id)) return folder.name;
+        }
+    }
+    return null;
+}
+
+fn writeCollectionNamesFromItem(w: *Writer, state: *const TuiState, item: schema.Item) !void {
+    if (item.collectionIds) |collection_ids| {
+        var wrote_any = false;
+        for (collection_ids) |maybe_collection_id| {
+            const collection_id = maybe_collection_id orelse continue;
+            for (state.session.vault_v2.collections) |collection| {
+                if (std.mem.eql(u8, collection.id, collection_id)) {
+                    if (wrote_any) try w.writeAll(", ");
+                    try w.writeAll(collection.name);
+                    wrote_any = true;
+                    break;
+                }
+            }
+        }
+        if (wrote_any) return;
+    }
+    try w.writeAll("(none)");
+}
+
+fn currentDetailFolderName(state: *const TuiState) ?[]const u8 {
+    if (state.detail_folder_pick_index) |idx| {
+        if (idx < state.session.vault_v2.folders.len) {
+            return state.session.vault_v2.folders[idx].name;
+        }
+    }
+    return null;
+}
+
+fn writeCurrentDetailCollectionNames(w: *Writer, state: *const TuiState) !void {
+    const selected = state.detail_collection_selection orelse {
+        try w.writeAll("(none)");
+        return;
+    };
+    var wrote_any = false;
+    for (state.session.vault_v2.collections, 0..) |collection, idx| {
+        if (!selected[idx]) continue;
+        if (wrote_any) try w.writeAll(", ");
+        try w.writeAll(collection.name);
+        wrote_any = true;
+    }
+    if (!wrote_any) try w.writeAll("(none)");
 }
 
 fn drawCategoryList(w: *Writer, state: *TuiState) !void {
@@ -828,13 +1222,26 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
     for (0..state.form_field_count) |i| {
         const field = &state.form_fields[i];
         const is_active = (i == state.form_active_field);
+        const hide_password = (!state.form_is_category and state.item_form_type == .login and i == 2 and !state.form_password_revealed);
 
         if (is_active) {
             try w.print("  {s}{s}{s:<10}{s} ", .{ Color.bold, Color.cyan, field.label, Color.reset });
-            try w.print("{s}{s}", .{ Color.underline, field.slice() });
+            try w.writeAll(Color.underline);
+            if (hide_password) {
+                for (field.slice()) |_| try w.writeAll(Icon.dot);
+            } else {
+                try w.writeAll(field.slice());
+            }
             try w.print("{s}{s}_{s}\n", .{ Color.reset, Color.bright_black, Color.reset });
         } else {
-            try w.print("  {s}{s:<10}{s} {s}\n", .{ Color.dim, field.label, Color.reset, field.slice() });
+            try w.print("  {s}{s:<10}{s} ", .{ Color.dim, field.label, Color.reset });
+            if (hide_password) {
+                for (field.slice()) |_| try w.writeAll(Icon.dot);
+                if (field.slice().len == 0) try w.writeAll("(empty)");
+                try w.writeAll("\n");
+            } else {
+                try w.print("{s}\n", .{field.slice()});
+            }
         }
     }
 
@@ -866,7 +1273,9 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
     try w.writeAll("\n");
     if (!state.form_is_category) {
         if (state.item_form_type == .login) {
-            try w.print("  {s}Tab{s}{s} next field  {s}Up/Down{s}{s} folder  {s}Ctrl+G{s}{s} generate password  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+            try w.print("  {s}Tab{s}{s} next field  {s}Up/Down{s}{s} folder  {s}Ctrl+G{s}{s} generate password  {s}Ctrl+T{s}{s} reveal/hide  {s}Cmd+Backspace/Ctrl+U{s}{s} clear  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+                Color.bold,  Color.reset, Color.dim,
+                Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
@@ -875,7 +1284,8 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
                 Color.reset,
             });
         } else {
-            try w.print("  {s}Tab{s}{s} next field  {s}Up/Down{s}{s} folder  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+            try w.print("  {s}Tab{s}{s} next field  {s}Up/Down{s}{s} folder  {s}Cmd+Backspace/Ctrl+U{s}{s} clear  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+                Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
@@ -884,7 +1294,8 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
             });
         }
     } else {
-        try w.print("  {s}Tab{s}{s} next field  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+        try w.print("  {s}Tab{s}{s} next field  {s}Cmd+Backspace/Ctrl+U{s}{s} clear  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+            Color.bold,  Color.reset, Color.dim,
             Color.bold,  Color.reset, Color.dim,
             Color.bold,  Color.reset, Color.dim,
             Color.bold,  Color.reset, Color.dim,
@@ -922,12 +1333,17 @@ fn drawHelp(w: *Writer, state: *const TuiState) !void {
     try w.writeAll("    Up/Down navigate, Enter detail, mouse click open, n/1 login, 2 note, 3 card, 4 identity, e edit, d delete, c categories, q quit\n");
 
     try w.print("\n  {s}Item detail{s}\n", .{ Color.cyan, Color.reset });
+    try w.writeAll("    Click any field to edit inline, Enter save field, Esc cancel field\n");
+    try w.writeAll("    Password edit asks confirmation each time, Ctrl+G or [generate] creates a new one\n");
+    try w.writeAll("    Folder/Collections edit uses popover selection\n");
     try w.writeAll("    p reveal password, y copy password, or click [reveal]/[copy] (hover underlines)\n");
 
     try w.print("\n  {s}Item/category forms{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    Tab next field, Enter save, Esc cancel\n");
+    try w.writeAll("    Cmd+Backspace / Ctrl+U clear active field\n");
     try w.writeAll("    In Folder field: Up/Down lists and selects existing folders\n");
     try w.writeAll("    Ctrl+G generate password (login form)\n");
+    try w.writeAll("    Ctrl+T reveal/hide password (login password field)\n");
     try w.writeAll("    In containers: n folder, o collection\n");
 
     try w.print("\n  {s}Global{s}\n", .{ Color.cyan, Color.reset });
@@ -967,9 +1383,13 @@ fn drawFooter(w: *Writer, state: *const TuiState) !void {
         .item_detail => {
             try drawKeyHint(w, "e", "edit");
             try drawKeyHint(w, "d", "delete");
+            try drawKeyHint(w, "Enter", "save field");
+            try drawKeyHint(w, "Esc", "cancel/back");
+            if (state.detail_edit_field != null and state.detail_edit_field.? == .password) {
+                try drawKeyHint(w, "Ctrl+G", "generate");
+            }
             try drawKeyHint(w, "p", "reveal");
             try drawKeyHint(w, "?", "help");
-            try drawKeyHint(w, "Esc", "back");
         },
         .category_list => {
             try drawKeyHint(w, "n", "new folder");
@@ -1021,6 +1441,7 @@ fn initItemFormForType(state: *TuiState, item_type: schema.ItemType) void {
     state.form_active_field = 0;
     state.item_form_type = item_type;
     state.form_folder_pick_index = null;
+    state.form_password_revealed = false;
 
     switch (item_type) {
         .login => {
@@ -1745,9 +2166,9 @@ fn validateV2Relations(state: *TuiState) bool {
 fn persistVault(state: *TuiState) !void {
     if (!validateV2Relations(state)) return;
 
-    storage.saveVault(
+    storage.saveVaultV2(
         state.allocator,
-        state.session.vault,
+        state.session.vault_v2,
         &state.session.key,
         &state.session.salt,
         state.session.vault_path,
@@ -1774,6 +2195,396 @@ fn refreshSessionV2FromDisk(state: *TuiState) !void {
     state.session.vault_v2_arena = loaded.arena;
     state.session.vault_v2_allocator = state.session.vault_v2_arena.allocator();
     state.session.salt = loaded.salt;
+}
+
+fn startDetailEditForField(state: *TuiState, field: DetailField) !void {
+    if (state.selected >= state.session.vault_v2.items.len) return;
+    const item = state.session.vault_v2.items[state.selected];
+
+    if (field == .password) {
+        state.clearDetailEditState();
+        state.detail_password_confirm_pending = true;
+        state.setMessage("Replace password? press y to confirm, n to cancel", false);
+        return;
+    }
+
+    state.clearDetailEditState();
+    state.detail_edit_field = field;
+
+    switch (field) {
+        .folder => syncDetailFolderPickerFromItem(state, item),
+        .collections => try initDetailCollectionSelectionFromItem(state, item),
+        else => loadDetailEditBufferFromItem(state, item, field),
+    }
+}
+
+fn startDetailPasswordEdit(state: *TuiState) void {
+    state.clearDetailEditState();
+    state.detail_edit_field = .password;
+    state.detail_edit_buffer.clear();
+    if (state.selected < state.session.vault_v2.items.len) {
+        const item = state.session.vault_v2.items[state.selected];
+        if (item.login != null and item.login.?.password != null) {
+            state.detail_edit_buffer.setFromSlice(item.login.?.password.?);
+        }
+    }
+    state.setMessage("Enter new password, Enter save, Ctrl+G generate", false);
+}
+
+fn revealPasswordInline(state: *TuiState, timeout_ms: u64) void {
+    const now = std.time.nanoTimestamp();
+    state.detail_password_reveal_until_ns = now + @as(i128, @intCast(timeout_ms)) * @as(i128, std.time.ns_per_ms);
+    state.setTimedMessage("Password revealed", false, timeout_ms);
+}
+
+fn loadDetailEditBufferFromItem(state: *TuiState, item: schema.Item, field: DetailField) void {
+    state.detail_edit_buffer.clear();
+    switch (field) {
+        .name => state.detail_edit_buffer.setFromSlice(item.name),
+        .user => if (item.login != null and item.login.?.username != null) state.detail_edit_buffer.setFromSlice(item.login.?.username.?),
+        .totp => if (item.login != null and item.login.?.totp != null) state.detail_edit_buffer.setFromSlice(item.login.?.totp.?),
+        .url => {
+            if (item.login != null and item.login.?.uris != null and item.login.?.uris.?.len > 0 and item.login.?.uris.?[0].uri != null) {
+                state.detail_edit_buffer.setFromSlice(item.login.?.uris.?[0].uri.?);
+            }
+        },
+        .notes => if (item.notes) |notes| state.detail_edit_buffer.setFromSlice(notes),
+        .org_id => if (item.organizationId) |org_id| state.detail_edit_buffer.setFromSlice(org_id),
+        .note_type => {
+            if (item.secureNote != null and item.secureNote.?.type != null) {
+                var buf: [4]u8 = undefined;
+                const out = std.fmt.bufPrint(&buf, "{d}", .{item.secureNote.?.type.?}) catch "";
+                state.detail_edit_buffer.setFromSlice(out);
+            }
+        },
+        .number => if (item.card != null and item.card.?.number != null) state.detail_edit_buffer.setFromSlice(item.card.?.number.?),
+        .brand => if (item.card != null and item.card.?.brand != null) state.detail_edit_buffer.setFromSlice(item.card.?.brand.?),
+        .code => if (item.card != null and item.card.?.code != null) state.detail_edit_buffer.setFromSlice(item.card.?.code.?),
+        .holder => if (item.card != null and item.card.?.cardholderName != null) state.detail_edit_buffer.setFromSlice(item.card.?.cardholderName.?),
+        .exp_month => if (item.card != null and item.card.?.expMonth != null) state.detail_edit_buffer.setFromSlice(item.card.?.expMonth.?),
+        .exp_year => if (item.card != null and item.card.?.expYear != null) state.detail_edit_buffer.setFromSlice(item.card.?.expYear.?),
+        .first_name => if (item.identity != null and item.identity.?.firstName != null) state.detail_edit_buffer.setFromSlice(item.identity.?.firstName.?),
+        .last_name => if (item.identity != null and item.identity.?.lastName != null) state.detail_edit_buffer.setFromSlice(item.identity.?.lastName.?),
+        .email => if (item.identity != null and item.identity.?.email != null) state.detail_edit_buffer.setFromSlice(item.identity.?.email.?),
+        .phone => if (item.identity != null and item.identity.?.phone != null) state.detail_edit_buffer.setFromSlice(item.identity.?.phone.?),
+        .password, .folder, .collections => {},
+    }
+}
+
+fn syncDetailFolderPickerFromItem(state: *TuiState, item: schema.Item) void {
+    state.detail_folder_pick_index = null;
+    if (item.folderId) |folder_id| {
+        for (state.session.vault_v2.folders, 0..) |folder, idx| {
+            if (std.mem.eql(u8, folder.id, folder_id)) {
+                state.detail_folder_pick_index = idx;
+                break;
+            }
+        }
+    }
+}
+
+fn initDetailCollectionSelectionFromItem(state: *TuiState, item: schema.Item) !void {
+    state.clearDetailCollectionSelection();
+    const collections = state.session.vault_v2.collections;
+    var flags = try state.allocator.alloc(bool, collections.len);
+    @memset(flags, false);
+
+    if (item.collectionIds) |collection_ids| {
+        for (collection_ids) |maybe_collection_id| {
+            const collection_id = maybe_collection_id orelse continue;
+            for (collections, 0..) |collection, idx| {
+                if (std.mem.eql(u8, collection.id, collection_id)) {
+                    flags[idx] = true;
+                    break;
+                }
+            }
+        }
+    }
+    state.detail_collection_selection = flags;
+
+    if (collections.len == 0) {
+        state.detail_collection_pick_index = null;
+        return;
+    }
+
+    state.detail_collection_pick_index = 0;
+    for (flags, 0..) |selected, idx| {
+        if (selected) {
+            state.detail_collection_pick_index = idx;
+            break;
+        }
+    }
+}
+
+fn moveDetailFolderPicker(state: *TuiState, direction: i8) void {
+    const folders = state.session.vault_v2.folders;
+    if (folders.len == 0) {
+        state.detail_folder_pick_index = null;
+        return;
+    }
+
+    const max_index: i32 = @intCast(folders.len - 1);
+    var pos: i32 = if (state.detail_folder_pick_index) |idx| @intCast(idx) else -1;
+    if (direction >= 0) {
+        pos += 1;
+        if (pos > max_index) pos = -1;
+    } else {
+        pos -= 1;
+        if (pos < -1) pos = max_index;
+    }
+    state.detail_folder_pick_index = if (pos < 0) null else @as(usize, @intCast(pos));
+}
+
+fn moveDetailCollectionPicker(state: *TuiState, direction: i8) void {
+    const count = state.session.vault_v2.collections.len;
+    if (count == 0) {
+        state.detail_collection_pick_index = null;
+        return;
+    }
+
+    if (state.detail_collection_pick_index == null) {
+        state.detail_collection_pick_index = if (direction >= 0) 0 else count - 1;
+        return;
+    }
+
+    var idx = state.detail_collection_pick_index.?;
+    if (direction >= 0) {
+        idx = (idx + 1) % count;
+    } else {
+        idx = if (idx == 0) count - 1 else idx - 1;
+    }
+    state.detail_collection_pick_index = idx;
+}
+
+fn toggleCurrentDetailCollection(state: *TuiState) void {
+    const selected = state.detail_collection_selection orelse return;
+    const idx = state.detail_collection_pick_index orelse return;
+    if (idx >= selected.len) return;
+    selected[idx] = !selected[idx];
+}
+
+fn setOptionalString(
+    allocator: std.mem.Allocator,
+    target: *?[]const u8,
+    value: []const u8,
+) !void {
+    if (target.*) |old| allocator.free(old);
+    target.* = if (value.len > 0) try allocator.dupe(u8, value) else null;
+}
+
+fn setFolderFromDetailSelection(state: *TuiState, item: *schema.Item) !void {
+    const allocator = state.session.vault_v2_allocator;
+    if (item.folderId) |old| allocator.free(old);
+    if (state.detail_folder_pick_index) |idx| {
+        if (idx < state.session.vault_v2.folders.len) {
+            item.folderId = try allocator.dupe(u8, state.session.vault_v2.folders[idx].id);
+        } else {
+            item.folderId = null;
+        }
+    } else {
+        item.folderId = null;
+    }
+}
+
+fn setCollectionsFromDetailSelection(state: *TuiState, item: *schema.Item) !void {
+    const allocator = state.session.vault_v2_allocator;
+    if (item.collectionIds) |ids| {
+        for (ids) |maybe_id| {
+            if (maybe_id) |id| allocator.free(id);
+        }
+        allocator.free(ids);
+    }
+
+    const selected = state.detail_collection_selection orelse {
+        item.collectionIds = null;
+        return;
+    };
+
+    var count: usize = 0;
+    for (selected) |is_selected| {
+        if (is_selected) count += 1;
+    }
+    if (count == 0) {
+        item.collectionIds = null;
+        return;
+    }
+
+    var ids = try allocator.alloc(?[]const u8, count);
+    var out_idx: usize = 0;
+    errdefer {
+        for (0..out_idx) |i| allocator.free(ids[i].?);
+        allocator.free(ids);
+    }
+    for (selected, 0..) |is_selected, idx| {
+        if (!is_selected) continue;
+        ids[out_idx] = try allocator.dupe(u8, state.session.vault_v2.collections[idx].id);
+        out_idx += 1;
+    }
+    item.collectionIds = ids;
+}
+
+fn touchItemRevision(allocator: std.mem.Allocator, item: *schema.Item) !void {
+    var now_buf: [20]u8 = undefined;
+    if (item.revisionDate) |old| allocator.free(old);
+    item.revisionDate = try allocator.dupe(u8, model.nowTimestamp(&now_buf));
+}
+
+fn saveActiveDetailField(state: *TuiState) !bool {
+    const field = state.detail_edit_field orelse return true;
+    if (state.selected >= state.session.vault_v2.items.len) {
+        state.setMessage("Invalid item selection", true);
+        return false;
+    }
+
+    const allocator = state.session.vault_v2_allocator;
+    var item = &state.session.vault_v2.items[state.selected];
+    const value = state.detail_edit_buffer.slice();
+    var changed = false;
+
+    switch (field) {
+        .name => {
+            if (item.type == 1) {
+                const username = if (item.login != null and item.login.?.username != null) item.login.?.username.? else "";
+                if (value.len == 0 and username.len == 0) {
+                    state.setMessage("Name or user is required", true);
+                    return false;
+                }
+            } else if (value.len == 0) {
+                state.setMessage("Name is required", true);
+                return false;
+            }
+            const new_name = if (value.len > 0) value else "(unnamed)";
+            const duped = try allocator.dupe(u8, new_name);
+            allocator.free(item.name);
+            item.name = duped;
+            changed = true;
+        },
+        .user => {
+            if (item.login == null) item.login = .{};
+            try setOptionalString(allocator, &item.login.?.username, value);
+            changed = true;
+        },
+        .password => {
+            if (value.len == 0) {
+                state.setMessage("Password unchanged (empty input)", true);
+                state.clearDetailEditState();
+                return true;
+            }
+            if (item.login == null) item.login = .{};
+            try setOptionalString(allocator, &item.login.?.password, value);
+            changed = true;
+        },
+        .totp => {
+            if (item.login == null) item.login = .{};
+            try setOptionalString(allocator, &item.login.?.totp, value);
+            changed = true;
+        },
+        .url => {
+            if (item.login == null) item.login = .{};
+            if (item.login.?.uris) |uris| {
+                for (uris) |old_uri| {
+                    if (old_uri.uri) |old| allocator.free(old);
+                }
+                allocator.free(uris);
+            }
+            if (value.len > 0) {
+                var uris = try allocator.alloc(schema.LoginUri, 1);
+                uris[0] = .{
+                    .uri = try allocator.dupe(u8, value),
+                    .match = null,
+                };
+                item.login.?.uris = uris;
+            } else {
+                item.login.?.uris = null;
+            }
+            changed = true;
+        },
+        .notes => {
+            try setOptionalString(allocator, &item.notes, value);
+            changed = true;
+        },
+        .folder => {
+            try setFolderFromDetailSelection(state, item);
+            changed = true;
+        },
+        .collections => {
+            try setCollectionsFromDetailSelection(state, item);
+            changed = true;
+        },
+        .org_id => {
+            try setOptionalString(allocator, &item.organizationId, value);
+            changed = true;
+        },
+        .note_type => {
+            if (item.secureNote == null) item.secureNote = .{};
+            if (value.len == 0) {
+                item.secureNote.?.type = null;
+            } else {
+                item.secureNote.?.type = std.fmt.parseInt(u8, value, 10) catch 0;
+            }
+            changed = true;
+        },
+        .number => {
+            if (item.card == null) item.card = .{};
+            try setOptionalString(allocator, &item.card.?.number, value);
+            changed = true;
+        },
+        .brand => {
+            if (item.card == null) item.card = .{};
+            try setOptionalString(allocator, &item.card.?.brand, value);
+            changed = true;
+        },
+        .code => {
+            if (item.card == null) item.card = .{};
+            try setOptionalString(allocator, &item.card.?.code, value);
+            changed = true;
+        },
+        .holder => {
+            if (item.card == null) item.card = .{};
+            try setOptionalString(allocator, &item.card.?.cardholderName, value);
+            changed = true;
+        },
+        .exp_month => {
+            if (item.card == null) item.card = .{};
+            try setOptionalString(allocator, &item.card.?.expMonth, value);
+            changed = true;
+        },
+        .exp_year => {
+            if (item.card == null) item.card = .{};
+            try setOptionalString(allocator, &item.card.?.expYear, value);
+            changed = true;
+        },
+        .first_name => {
+            if (item.identity == null) item.identity = .{};
+            try setOptionalString(allocator, &item.identity.?.firstName, value);
+            changed = true;
+        },
+        .last_name => {
+            if (item.identity == null) item.identity = .{};
+            try setOptionalString(allocator, &item.identity.?.lastName, value);
+            changed = true;
+        },
+        .email => {
+            if (item.identity == null) item.identity = .{};
+            try setOptionalString(allocator, &item.identity.?.email, value);
+            changed = true;
+        },
+        .phone => {
+            if (item.identity == null) item.identity = .{};
+            try setOptionalString(allocator, &item.identity.?.phone, value);
+            changed = true;
+        },
+    }
+
+    if (changed) {
+        try touchItemRevision(allocator, item);
+        try rebuildRuntimeFromV2(state);
+        state.session.dirty = true;
+        try persistVault(state);
+        state.setMessage("Field updated", false);
+    }
+    state.clearDetailEditState();
+    return true;
 }
 
 // ─── Input handling ─────────────────────────────────────────────────────────
@@ -1806,7 +2617,9 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
             if (count == 0) return;
             if (itemIndexAtMouseRow(state, ev.mouse_row)) |idx| {
                 state.selected = idx;
+                state.clearDetailEditState();
                 state.detail_hover_button = .none;
+                state.detail_hover_field = null;
                 state.screen = .item_detail;
             }
         },
@@ -1818,7 +2631,9 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
         },
         .enter => {
             if (count > 0) {
+                state.clearDetailEditState();
                 state.detail_hover_button = .none;
+                state.detail_hover_field = null;
                 state.screen = .item_detail;
             }
         },
@@ -1881,70 +2696,204 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
 }
 
 fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
+    if (state.selected >= state.session.vault_v2.items.len) {
+        state.screen = .item_list;
+        return;
+    }
+
     switch (ev.key) {
         .mouse_move => {
-            state.detail_hover_button = detailButtonAtMouse(ev.mouse_row, ev.mouse_col);
+            state.detail_hover_button = detailButtonAtMouse(state, ev.mouse_row, ev.mouse_col);
+            if (state.detail_hover_button == .none) {
+                state.detail_hover_field = detailFieldAtMouse(state, ev.mouse_row, ev.mouse_col);
+            } else {
+                state.detail_hover_field = null;
+            }
         },
         .mouse_left => {
-            const action = detailButtonAtMouse(ev.mouse_row, ev.mouse_col);
-            state.detail_hover_button = action;
-            switch (action) {
-                .reveal => {
-                    const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
-                    state.setTimedMessage(pw, false, 3000);
-                },
-                .copy => {
-                    const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
-                    const copied = utils.copyToClipboard(state.allocator, pw) catch false;
-                    if (copied) {
-                        state.setTimedMessage("Password copied to clipboard", false, 3000);
-                    } else {
-                        state.setTimedMessage("Clipboard unavailable (pbcopy/wl-copy/xclip)", true, 3000);
+            if (state.detail_popover_kind != .none) {
+                if (detailPopoverOptionAtMouse(state, ev.mouse_row)) |opt_idx| {
+                    switch (state.detail_popover_kind) {
+                        .folder => {
+                            state.setTimedMessage("Use Up/Down to select folder", false, 2000);
+                        },
+                        .collections => {
+                            if (state.detail_collection_selection) |selected| {
+                                if (opt_idx < selected.len) {
+                                    state.detail_collection_pick_index = opt_idx;
+                                    selected[opt_idx] = !selected[opt_idx];
+                                }
+                            }
+                        },
+                        .none => {},
                     }
-                },
-                .none => {},
+                    return;
+                }
+            }
+
+            const action = detailButtonAtMouse(state, ev.mouse_row, ev.mouse_col);
+            if (action != .none) {
+                state.detail_hover_button = action;
+                switch (action) {
+                    .generate => {
+                        try generatePasswordInDetailField(state);
+                    },
+                    .reveal => {
+                        if (state.detail_edit_field == null and !state.detail_password_confirm_pending) {
+                            revealPasswordInline(state, 3000);
+                        }
+                    },
+                    .copy => {
+                        if (state.detail_edit_field == null and !state.detail_password_confirm_pending) {
+                            const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
+                            const copied = utils.copyToClipboard(state.allocator, pw) catch false;
+                            if (copied) {
+                                state.setTimedMessage("Password copied to clipboard", false, 3000);
+                            } else {
+                                state.setTimedMessage("Clipboard unavailable (pbcopy/wl-copy/xclip)", true, 3000);
+                            }
+                        }
+                    },
+                    .none => {},
+                }
+                return;
+            }
+
+            if (detailFieldAtMouse(state, ev.mouse_row, ev.mouse_col)) |clicked_field| {
+                if (state.detail_password_confirm_pending) {
+                    state.detail_password_confirm_pending = false;
+                }
+                if (state.detail_edit_field) |active_field| {
+                    if (active_field != clicked_field) {
+                        const saved = try saveActiveDetailField(state);
+                        if (!saved) return;
+                    }
+                }
+                if (state.detail_edit_field == null or state.detail_edit_field.? != clicked_field) {
+                    try startDetailEditForField(state, clicked_field);
+                }
+                return;
             }
         },
         .escape => {
+            if (state.detail_password_confirm_pending) {
+                state.detail_password_confirm_pending = false;
+                return;
+            }
+            if (state.detail_edit_field != null) {
+                state.clearDetailEditState();
+                state.setMessage("Edit canceled", false);
+                return;
+            }
             state.detail_hover_button = .none;
+            state.detail_hover_field = null;
             state.screen = .item_list;
         },
+        .enter => {
+            if (state.detail_edit_field != null) {
+                _ = try saveActiveDetailField(state);
+            }
+        },
+        .up => {
+            if (state.detail_edit_field) |field| {
+                switch (field) {
+                    .folder => moveDetailFolderPicker(state, -1),
+                    .collections => moveDetailCollectionPicker(state, -1),
+                    else => {},
+                }
+            }
+        },
+        .down => {
+            if (state.detail_edit_field) |field| {
+                switch (field) {
+                    .folder => moveDetailFolderPicker(state, 1),
+                    .collections => moveDetailCollectionPicker(state, 1),
+                    else => {},
+                }
+            }
+        },
+        .backspace => {
+            if (state.detail_edit_field) |field| {
+                switch (field) {
+                    .folder, .collections => {},
+                    else => state.detail_edit_buffer.deleteChar(),
+                }
+            }
+        },
+        .clear_line => {
+            if (state.detail_edit_field) |field| {
+                switch (field) {
+                    .folder, .collections => {},
+                    else => state.detail_edit_buffer.clear(),
+                }
+            }
+        },
         .char => switch (ev.char) {
-            'e' => {
-                const item = state.session.vault_v2.items[state.selected];
-                state.form_editing_index = state.selected;
-                prefillItemFormFromV2(state, item);
-                state.detail_hover_button = .none;
-                state.screen = .item_form;
-            },
-            'd' => {
-                const selected_item = state.session.vault_v2.items[state.selected];
-                state.delete_target_name = if (selected_item.name.len > 0) selected_item.name else "(unnamed)";
-                state.delete_is_category = false;
-                state.prev_screen = .item_detail;
-                state.detail_hover_button = .none;
-                state.screen = .confirm_delete;
-            },
-            'p' => {
-                // Toggle reveal password (just show it as a message for now)
-                const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
-                state.setTimedMessage(pw, false, 3000);
-            },
-            'y' => {
-                const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
-                const copied = utils.copyToClipboard(state.allocator, pw) catch false;
-                if (copied) {
-                    state.setTimedMessage("Password copied to clipboard", false, 3000);
-                } else {
-                    state.setTimedMessage("Clipboard unavailable (pbcopy/wl-copy/xclip)", true, 3000);
+            else => {
+                if (state.detail_password_confirm_pending) {
+                    switch (ev.char) {
+                        'y', 'Y' => startDetailPasswordEdit(state),
+                        'n', 'N' => {
+                            state.detail_password_confirm_pending = false;
+                            state.setMessage("Password update canceled", false);
+                        },
+                        else => {},
+                    }
+                    return;
+                }
+
+                if (state.detail_edit_field) |field| {
+                    if (ev.char == 7 and field == .password) {
+                        try generatePasswordInDetailField(state);
+                        return;
+                    }
+                    switch (field) {
+                        .collections => if (ev.char == ' ') toggleCurrentDetailCollection(state),
+                        .folder => {},
+                        else => state.detail_edit_buffer.appendChar(ev.char),
+                    }
+                    return;
+                }
+
+                switch (ev.char) {
+                    'e' => {
+                        const item = state.session.vault_v2.items[state.selected];
+                        state.form_editing_index = state.selected;
+                        prefillItemFormFromV2(state, item);
+                        state.detail_hover_button = .none;
+                        state.detail_hover_field = null;
+                        state.screen = .item_form;
+                    },
+                    'd' => {
+                        const selected_item = state.session.vault_v2.items[state.selected];
+                        state.delete_target_name = if (selected_item.name.len > 0) selected_item.name else "(unnamed)";
+                        state.delete_is_category = false;
+                        state.prev_screen = .item_detail;
+                        state.detail_hover_button = .none;
+                        state.detail_hover_field = null;
+                        state.screen = .confirm_delete;
+                    },
+                    'p' => {
+                        revealPasswordInline(state, 3000);
+                    },
+                    'y' => {
+                        const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
+                        const copied = utils.copyToClipboard(state.allocator, pw) catch false;
+                        if (copied) {
+                            state.setTimedMessage("Password copied to clipboard", false, 3000);
+                        } else {
+                            state.setTimedMessage("Clipboard unavailable (pbcopy/wl-copy/xclip)", true, 3000);
+                        }
+                    },
+                    '?' => {
+                        state.prev_screen = .item_detail;
+                        state.detail_hover_button = .none;
+                        state.detail_hover_field = null;
+                        state.screen = .help;
+                    },
+                    else => {},
                 }
             },
-            '?' => {
-                state.prev_screen = .item_detail;
-                state.detail_hover_button = .none;
-                state.screen = .help;
-            },
-            else => {},
         },
         else => {},
     }
@@ -2040,9 +2989,20 @@ fn handleForm(state: *TuiState, ev: KeyEvent, is_category: bool) !void {
             }
             state.form_fields[state.form_active_field].deleteChar();
         },
+        .clear_line => {
+            if (!is_category and folderFieldIsActive(state)) {
+                state.form_folder_pick_index = null;
+            }
+            state.form_fields[state.form_active_field].clear();
+        },
         .char => |_| {
             if (!is_category and ev.char == 7 and state.item_form_type == .login) {
                 try generatePasswordInForm(state);
+                return;
+            }
+            if (!is_category and ev.char == 20 and state.item_form_type == .login and state.form_active_field == 2) {
+                state.form_password_revealed = !state.form_password_revealed;
+                state.setMessage(if (state.form_password_revealed) "Password visible" else "Password hidden", false);
                 return;
             }
             if (!is_category and folderFieldIsActive(state)) {
@@ -2081,6 +3041,19 @@ fn generatePasswordInForm(state: *TuiState) !void {
         state.form_fields[2].clear();
         state.form_fields[2].setFromSlice(pw);
         state.allocator.free(pw);
+        state.setMessage("Password generated", false);
+    } else {
+        state.setMessage("Wordlist not loaded", true);
+    }
+}
+
+fn generatePasswordInDetailField(state: *TuiState) !void {
+    if (state.detail_edit_field == null or state.detail_edit_field.? != .password) return;
+    if (state.wordlist) |wl| {
+        const pw = try bip39.generateMnemonic(state.allocator, wl, "-");
+        defer state.allocator.free(pw);
+        state.detail_edit_buffer.clear();
+        state.detail_edit_buffer.setFromSlice(pw);
         state.setMessage("Password generated", false);
     } else {
         state.setMessage("Wordlist not loaded", true);
@@ -2174,6 +3147,7 @@ test "removeContainerAtSelection deletes collection links from items" {
 
 pub fn run(allocator: std.mem.Allocator, session: *VaultSession) !void {
     var state = TuiState.init(allocator, session);
+    defer state.clearDetailCollectionSelection();
 
     // Load wordlist
     state.wordlist = bip39.loadWordlist(allocator, storage.getWordlistPath()) catch null;
