@@ -197,7 +197,7 @@ pub fn readPassword(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
             else => {
                 if (c >= 32 and c < 127) {
                     try line.append(allocator, c);
-                    _ = std.posix.write(std.fs.File.stdout().handle, "*") catch {};
+                    _ = std.posix.write(std.fs.File.stdout().handle, Icon.dot) catch {};
                 }
             },
         }

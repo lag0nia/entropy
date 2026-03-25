@@ -81,6 +81,13 @@ const DetailPopoverKind = enum {
     collections,
 };
 
+const FormPasswordButton = enum {
+    none,
+    reveal,
+    copy,
+    generate,
+};
+
 // ─── Screen types ───────────────────────────────────────────────────────────
 
 const Screen = enum {
@@ -182,6 +189,12 @@ const TuiState = struct {
     item_form_type: schema.ItemType = .login,
     form_container_kind: ContainerKind = .folder,
     form_folder_pick_index: ?usize = null,
+    form_collection_pick_index: ?usize = null,
+    form_collection_selection: ?[]bool = null,
+    form_hover_field: ?usize = null,
+    form_field_rows: [12]u16 = [_]u16{0} ** 12,
+    form_buttons_row: u16 = 0,
+    form_hover_button: FormPasswordButton = .none,
     form_password_revealed: bool = false,
     detail_hover_button: DetailButton = .none,
     detail_hover_field: ?DetailField = null,
