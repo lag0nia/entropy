@@ -29,6 +29,7 @@ const Key = enum {
     backspace,
     clear_line,
     tab,
+    shift_tab,
     char,
     unknown,
 };
@@ -295,6 +296,19 @@ const TuiState = struct {
         self.detail_popover_row_start = 0;
         self.detail_popover_count = 0;
     }
+
+    fn clearFormCollectionSelection(self: *TuiState) void {
+        if (self.form_collection_selection) |slice| {
+            self.allocator.free(slice);
+            self.form_collection_selection = null;
+        }
+    }
+
+    fn resetFormUiState(self: *TuiState) void {
+        self.form_hover_field = null;
+        self.form_hover_button = .none;
+        self.form_buttons_row = 0;
+    }
 };
 
 // ─── Raw mode ───────────────────────────────────────────────────────────────
@@ -381,6 +395,7 @@ fn readKey(fd: std.posix.fd_t) ?KeyEvent {
 
     // Escape sequences
     if (n >= 3 and buf[0] == 27 and buf[1] == '[') {
+        if (buf[2] == 'Z') return .{ .key = .shift_tab };
         return switch (buf[2]) {
             'A' => .{ .key = .up },
             'B' => .{ .key = .down },
@@ -1215,6 +1230,10 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
         else
             "New Item");
     const item_type_hint: []const u8 = if (state.form_is_category) "" else itemTypeLabel(@intFromEnum(state.item_form_type));
+    const creation_mode = (!state.form_is_category and state.form_editing_index == null);
+
+    const mut_state: *TuiState = @constCast(state);
+    mut_state.resetFormUiState();
 
     try w.writeAll("\n");
     if (state.form_is_category) {
@@ -1232,9 +1251,14 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
     }
     try w.print("{s}\n\n", .{Color.reset});
 
+    var row: u16 = 7;
     for (0..state.form_field_count) |i| {
+        mut_state.form_field_rows[i] = row;
+        row += 1;
+
         const field = &state.form_fields[i];
         const is_active = (i == state.form_active_field);
+        const is_hover = (creation_mode and state.form_hover_field != null and state.form_hover_field.? == i and !is_active);
         const hide_password = (!state.form_is_category and state.item_form_type == .login and i == 2 and !state.form_password_revealed);
 
         if (is_active) {
@@ -1248,45 +1272,79 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
             try w.print("{s}{s}_{s}\n", .{ Color.reset, Color.bright_black, Color.reset });
         } else {
             try w.print("  {s}{s:<10}{s} ", .{ Color.dim, field.label, Color.reset });
+            if (is_hover) try w.writeAll(Color.underline);
             if (hide_password) {
                 for (field.slice()) |_| try w.writeAll(Icon.dot);
                 if (field.slice().len == 0) try w.writeAll("(empty)");
-                try w.writeAll("\n");
+            } else if (field.slice().len > 0) {
+                try w.writeAll(field.slice());
             } else {
-                try w.print("{s}\n", .{field.slice()});
+                try w.writeAll("(empty)");
             }
+            if (is_hover) try w.writeAll(Color.reset);
+            try w.writeAll("\n");
         }
     }
 
-    if (folderFieldIsActive(state)) {
-        const folders = state.session.vault_v2.folders;
-        if (folders.len > 0) {
-            const folder_field_idx = folderFieldIndexForType(state.item_form_type);
-            const current_name = state.form_fields[folder_field_idx].slice();
-            try w.writeAll("\n");
-            try w.print("  {s}Available folders (Up/Down to select):{s}\n", .{
-                Color.dim, Color.reset,
-            });
-            for (folders, 0..) |folder, idx| {
-                const is_marked = if (state.form_folder_pick_index) |picked|
-                    picked == idx
-                else
-                    std.mem.eql(u8, current_name, folder.name);
-                if (is_marked) {
-                    try w.print("    {s}> {s}{s}{s}\n", .{
-                        Color.cyan, Color.bold, folder.name, Color.reset,
+    if (creation_mode and folderFieldIsActive(state)) {
+        try w.writeAll("\n");
+        try w.print("  {s}Folders (Up/Down, Left/Right field nav):{s}\n", .{
+            Color.dim, Color.reset,
+        });
+        const none_selected = state.form_folder_pick_index == null;
+        if (none_selected) {
+            try w.print("    {s}> [none]{s}\n", .{ Color.cyan, Color.reset });
+        } else {
+            try w.writeAll("      [none]\n");
+        }
+        for (state.session.vault_v2.folders, 0..) |folder, idx| {
+            const selected = state.form_folder_pick_index != null and state.form_folder_pick_index.? == idx;
+            if (selected) {
+                try w.print("    {s}> {s}{s}{s}\n", .{
+                    Color.cyan, Color.bold, folder.name, Color.reset,
+                });
+            } else {
+                try w.print("      {s}\n", .{folder.name});
+            }
+        }
+    } else if (creation_mode and collectionFieldIsActive(state)) {
+        try w.writeAll("\n");
+        try w.print("  {s}Collections (Up/Down, Space toggle, Left/Right field nav):{s}\n", .{
+            Color.dim, Color.reset,
+        });
+        if (state.session.vault_v2.collections.len == 0) {
+            try w.print("    {s}(no collections){s}\n", .{ Color.dim, Color.reset });
+        } else if (state.form_collection_selection) |selected| {
+            for (state.session.vault_v2.collections, 0..) |collection, idx| {
+                const cursor = state.form_collection_pick_index != null and state.form_collection_pick_index.? == idx;
+                const marked = selected[idx];
+                if (cursor) {
+                    try w.print("    {s}> [{s}] {s}{s}{s}\n", .{
+                        Color.cyan,
+                        if (marked) "x" else " ",
+                        Color.bold,
+                        collection.name,
+                        Color.reset,
                     });
                 } else {
-                    try w.print("      {s}\n", .{folder.name});
+                    try w.print("      [{s}] {s}\n", .{
+                        if (marked) "x" else " ",
+                        collection.name,
+                    });
                 }
             }
+        } else {
+            try w.print("    {s}(none){s}\n", .{ Color.dim, Color.reset });
         }
     }
 
     try w.writeAll("\n");
+    try drawFormPasswordButtons(w, mut_state, row + 1, creation_mode);
+
     if (!state.form_is_category) {
         if (state.item_form_type == .login) {
-            try w.print("  {s}Tab{s}{s} next field  {s}Up/Down{s}{s} folder  {s}Ctrl+G{s}{s} generate password  {s}Ctrl+T{s}{s} reveal/hide  {s}Cmd+Backspace/Ctrl+U{s}{s} clear  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+            try w.print("  {s}Tab/Shift+Tab{s}{s} next/prev  {s}Arrows{s}{s} nav/selectors  {s}Ctrl+G{s}{s} generate  {s}p{s}{s} reveal/hide  {s}y{s}{s} copy  {s}Cmd+Backspace/Ctrl+U{s}{s} clear  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+                Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
@@ -1297,7 +1355,7 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
                 Color.reset,
             });
         } else {
-            try w.print("  {s}Tab{s}{s} next field  {s}Up/Down{s}{s} folder  {s}Cmd+Backspace/Ctrl+U{s}{s} clear  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+            try w.print("  {s}Tab/Shift+Tab{s}{s} next/prev  {s}Arrows{s}{s} nav/selectors  {s}Cmd+Backspace/Ctrl+U{s}{s} clear  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
                 Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
                 Color.bold,  Color.reset, Color.dim,
@@ -1307,7 +1365,8 @@ fn drawForm(w: *Writer, state: *const TuiState) !void {
             });
         }
     } else {
-        try w.print("  {s}Tab{s}{s} next field  {s}Cmd+Backspace/Ctrl+U{s}{s} clear  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+        try w.print("  {s}Tab/Shift+Tab{s}{s} next/prev  {s}Arrows{s}{s} next/prev  {s}Cmd+Backspace/Ctrl+U{s}{s} clear  {s}Enter{s}{s} save  {s}Esc{s}{s} cancel{s}\n", .{
+            Color.bold,  Color.reset, Color.dim,
             Color.bold,  Color.reset, Color.dim,
             Color.bold,  Color.reset, Color.dim,
             Color.bold,  Color.reset, Color.dim,
@@ -1352,11 +1411,10 @@ fn drawHelp(w: *Writer, state: *const TuiState) !void {
     try w.writeAll("    p reveal password, y copy password, or click [reveal]/[copy] (hover underlines)\n");
 
     try w.print("\n  {s}Item/category forms{s}\n", .{ Color.cyan, Color.reset });
-    try w.writeAll("    Tab next field, Enter save, Esc cancel\n");
+    try w.writeAll("    Tab/Shift+Tab next/prev field, Arrows navigate, Enter save, Esc cancel\n");
     try w.writeAll("    Cmd+Backspace / Ctrl+U clear active field\n");
-    try w.writeAll("    In Folder field: Up/Down lists and selects existing folders\n");
-    try w.writeAll("    Ctrl+G generate password (login form)\n");
-    try w.writeAll("    Ctrl+T reveal/hide password (login password field)\n");
+    try w.writeAll("    Creation form supports click-to-focus fields and folder/collections selectors\n");
+    try w.writeAll("    Login creation: Ctrl+G or [generate], p [reveal/hide], y [copy]\n");
     try w.writeAll("    In containers: n folder, o collection\n");
 
     try w.print("\n  {s}Global{s}\n", .{ Color.cyan, Color.reset });
@@ -1454,6 +1512,9 @@ fn initItemFormForType(state: *TuiState, item_type: schema.ItemType) void {
     state.form_active_field = 0;
     state.item_form_type = item_type;
     state.form_folder_pick_index = null;
+    state.form_collection_pick_index = null;
+    state.clearFormCollectionSelection();
+    state.resetFormUiState();
     state.form_password_revealed = false;
 
     switch (item_type) {
@@ -1522,6 +1583,24 @@ fn folderFieldIsActive(state: *const TuiState) bool {
     return state.form_active_field == folderFieldIndexForType(state.item_form_type);
 }
 
+fn collectionFieldIndexForType(item_type: schema.ItemType) usize {
+    return switch (item_type) {
+        .login => 7,
+        .secure_note => 4,
+        .card => 9,
+        .identity => 7,
+    };
+}
+
+fn collectionFieldIsActive(state: *const TuiState) bool {
+    if (state.form_is_category) return false;
+    return state.form_active_field == collectionFieldIndexForType(state.item_form_type);
+}
+
+fn isItemCreationForm(state: *const TuiState, is_category: bool) bool {
+    return !is_category and state.screen == .item_form and state.form_editing_index == null;
+}
+
 fn syncFolderPickerFromCurrentField(state: *TuiState) void {
     const field_index = folderFieldIndexForType(state.item_form_type);
     const current_name = state.form_fields[field_index].slice();
@@ -1536,7 +1615,10 @@ fn syncFolderPickerFromCurrentField(state: *TuiState) void {
 
 fn moveFolderPicker(state: *TuiState, direction: i8) void {
     const folders = state.session.vault_v2.folders;
+    const field_index = folderFieldIndexForType(state.item_form_type);
     if (folders.len == 0) {
+        state.form_folder_pick_index = null;
+        state.form_fields[field_index].clear();
         state.setMessage("No folders available", true);
         return;
     }
@@ -1545,22 +1627,200 @@ fn moveFolderPicker(state: *TuiState, direction: i8) void {
         syncFolderPickerFromCurrentField(state);
     }
 
-    var idx: usize = undefined;
-    if (state.form_folder_pick_index) |current| {
-        idx = if (direction >= 0)
-            (current + 1) % folders.len
-        else if (current == 0)
-            folders.len - 1
-        else
-            current - 1;
+    const max_index: i32 = @intCast(folders.len - 1);
+    var pos: i32 = if (state.form_folder_pick_index) |idx| @intCast(idx) else -1;
+    if (direction >= 0) {
+        pos += 1;
+        if (pos > max_index) pos = -1;
     } else {
-        idx = if (direction >= 0) 0 else folders.len - 1;
+        pos -= 1;
+        if (pos < -1) pos = max_index;
     }
-    state.form_folder_pick_index = idx;
 
-    const field_index = folderFieldIndexForType(state.item_form_type);
+    if (pos < 0) {
+        state.form_folder_pick_index = null;
+        state.form_fields[field_index].clear();
+    } else {
+        const idx: usize = @intCast(pos);
+        state.form_folder_pick_index = idx;
+        state.form_fields[field_index].clear();
+        state.form_fields[field_index].setFromSlice(folders[idx].name);
+    }
+}
+
+fn parseFormCollectionSelectionFromField(state: *TuiState) void {
+    if (state.form_collection_selection) |selected| {
+        @memset(selected, false);
+        const field_index = collectionFieldIndexForType(state.item_form_type);
+        var tok = std.mem.tokenizeScalar(u8, state.form_fields[field_index].slice(), ',');
+        while (tok.next()) |entry| {
+            const name = std.mem.trim(u8, entry, " \t");
+            if (name.len == 0) continue;
+            for (state.session.vault_v2.collections, 0..) |collection, idx| {
+                if (std.mem.eql(u8, collection.name, name)) {
+                    selected[idx] = true;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn writeFormCollectionSelectionToField(state: *TuiState) void {
+    const selected = state.form_collection_selection orelse return;
+    const field_index = collectionFieldIndexForType(state.item_form_type);
     state.form_fields[field_index].clear();
-    state.form_fields[field_index].setFromSlice(folders[idx].name);
+
+    var builder = std.ArrayList(u8){};
+    defer builder.deinit(state.allocator);
+
+    for (state.session.vault_v2.collections, 0..) |collection, idx| {
+        if (!selected[idx]) continue;
+        if (builder.items.len > 0) {
+            builder.appendSlice(state.allocator, ", ") catch return;
+        }
+        builder.appendSlice(state.allocator, collection.name) catch return;
+    }
+    if (builder.items.len > 0) {
+        state.form_fields[field_index].setFromSlice(builder.items);
+    }
+}
+
+fn ensureFormCollectionSelection(state: *TuiState) void {
+    if (state.form_collection_selection == null) {
+        const count = state.session.vault_v2.collections.len;
+        const selected = state.allocator.alloc(bool, count) catch {
+            state.setMessage("Out of memory for collections", true);
+            return;
+        };
+        @memset(selected, false);
+        state.form_collection_selection = selected;
+    } else if (state.form_collection_selection.?.len != state.session.vault_v2.collections.len) {
+        state.clearFormCollectionSelection();
+        const count = state.session.vault_v2.collections.len;
+        const selected = state.allocator.alloc(bool, count) catch {
+            state.setMessage("Out of memory for collections", true);
+            return;
+        };
+        @memset(selected, false);
+        state.form_collection_selection = selected;
+    }
+    parseFormCollectionSelectionFromField(state);
+    if (state.session.vault_v2.collections.len == 0) {
+        state.form_collection_pick_index = null;
+    } else if (state.form_collection_pick_index == null or state.form_collection_pick_index.? >= state.session.vault_v2.collections.len) {
+        state.form_collection_pick_index = 0;
+    }
+}
+
+fn moveFormCollectionPicker(state: *TuiState, direction: i8) void {
+    ensureFormCollectionSelection(state);
+    const count = state.session.vault_v2.collections.len;
+    if (count == 0) {
+        state.form_collection_pick_index = null;
+        return;
+    }
+    if (state.form_collection_pick_index == null) {
+        state.form_collection_pick_index = if (direction >= 0) 0 else count - 1;
+        return;
+    }
+    var idx = state.form_collection_pick_index.?;
+    if (direction >= 0) {
+        idx = (idx + 1) % count;
+    } else {
+        idx = if (idx == 0) count - 1 else idx - 1;
+    }
+    state.form_collection_pick_index = idx;
+}
+
+fn toggleCurrentFormCollection(state: *TuiState) void {
+    ensureFormCollectionSelection(state);
+    const selected = state.form_collection_selection orelse return;
+    const idx = state.form_collection_pick_index orelse return;
+    if (idx >= selected.len) return;
+    selected[idx] = !selected[idx];
+    writeFormCollectionSelectionToField(state);
+}
+
+fn clearFormCollections(state: *TuiState) void {
+    ensureFormCollectionSelection(state);
+    if (state.form_collection_selection) |selected| @memset(selected, false);
+    writeFormCollectionSelectionToField(state);
+}
+
+fn syncFormPickersForActiveField(state: *TuiState, creation_mode: bool) void {
+    if (!creation_mode) return;
+    if (folderFieldIsActive(state)) {
+        syncFolderPickerFromCurrentField(state);
+    } else if (collectionFieldIsActive(state)) {
+        ensureFormCollectionSelection(state);
+    }
+}
+
+fn formFieldIndexAtMouse(state: *const TuiState, row: u16, col: u16) ?usize {
+    if (col < 3) return null;
+    for (0..state.form_field_count) |i| {
+        if (state.form_field_rows[i] == row) return i;
+    }
+    return null;
+}
+
+fn formPasswordButtonsVisible(state: *const TuiState, creation_mode: bool) bool {
+    return creation_mode and !state.form_is_category and state.item_form_type == .login;
+}
+
+fn drawFormPasswordButtons(w: *Writer, state: *TuiState, row: u16, creation_mode: bool) !void {
+    state.form_buttons_row = row;
+    if (!formPasswordButtonsVisible(state, creation_mode)) return;
+    const hovered = state.form_hover_button;
+    try w.writeAll("  ");
+    const reveal_label = if (state.form_password_revealed) "hide (p)" else "reveal (p)";
+    try drawDetailButton(w, reveal_label, hovered == .reveal);
+    try w.writeAll("  ");
+    try drawDetailButton(w, "copy (y)", hovered == .copy);
+    try w.writeAll("  ");
+    try drawDetailButton(w, "generate (ctrl+g)", hovered == .generate);
+    try w.writeAll("\n");
+}
+
+fn formPasswordButtonAtMouse(state: *const TuiState, row: u16, col: u16, creation_mode: bool) FormPasswordButton {
+    if (!formPasswordButtonsVisible(state, creation_mode)) return .none;
+    if (row != state.form_buttons_row) return .none;
+
+    const reveal_text = if (state.form_password_revealed) "[hide (p)]" else "[reveal (p)]";
+    const copy_text = "[copy (y)]";
+    const generate_text = "[generate (ctrl+g)]";
+    const reveal_start: u16 = 3;
+    const reveal_end: u16 = reveal_start + @as(u16, @intCast(reveal_text.len - 1));
+    const copy_start: u16 = reveal_end + 3;
+    const copy_end: u16 = copy_start + @as(u16, @intCast(copy_text.len - 1));
+    const generate_start: u16 = copy_end + 3;
+    const generate_end: u16 = generate_start + @as(u16, @intCast(generate_text.len - 1));
+
+    if (col >= reveal_start and col <= reveal_end) return .reveal;
+    if (col >= copy_start and col <= copy_end) return .copy;
+    if (col >= generate_start and col <= generate_end) return .generate;
+    return .none;
+}
+
+fn toggleFormPasswordReveal(state: *TuiState) void {
+    state.form_password_revealed = !state.form_password_revealed;
+    state.setMessage(if (state.form_password_revealed) "Password visible" else "Password hidden", false);
+}
+
+fn copyFormPassword(state: *TuiState) void {
+    if (state.item_form_type != .login) return;
+    const pw = state.form_fields[2].slice();
+    if (pw.len == 0) {
+        state.setTimedMessage("Password field is empty", true, 3000);
+        return;
+    }
+    const copied = utils.copyToClipboard(state.allocator, pw) catch false;
+    if (copied) {
+        state.setTimedMessage("Password copied to clipboard", false, 3000);
+    } else {
+        state.setTimedMessage("Clipboard unavailable (pbcopy/wl-copy/xclip)", true, 3000);
+    }
 }
 
 fn saveItemForm(state: *TuiState) !void {
@@ -2972,8 +3232,49 @@ fn handleCategoryList(state: *TuiState, ev: KeyEvent) !void {
 }
 
 fn handleForm(state: *TuiState, ev: KeyEvent, is_category: bool) !void {
+    const creation_mode = isItemCreationForm(state, is_category);
+    const password_field_idx: usize = if (!is_category and state.item_form_type == .login) 2 else std.math.maxInt(usize);
+
+    if (creation_mode) {
+        switch (ev.key) {
+            .mouse_move => {
+                state.form_hover_button = formPasswordButtonAtMouse(state, ev.mouse_row, ev.mouse_col, creation_mode);
+                if (state.form_hover_button == .none) {
+                    state.form_hover_field = formFieldIndexAtMouse(state, ev.mouse_row, ev.mouse_col);
+                } else {
+                    state.form_hover_field = null;
+                }
+            },
+            .mouse_left => {
+                const button = formPasswordButtonAtMouse(state, ev.mouse_row, ev.mouse_col, creation_mode);
+                if (button != .none) {
+                    state.form_hover_button = button;
+                    switch (button) {
+                        .reveal => toggleFormPasswordReveal(state),
+                        .copy => copyFormPassword(state),
+                        .generate => try generatePasswordInForm(state),
+                        .none => {},
+                    }
+                    return;
+                }
+
+                if (formFieldIndexAtMouse(state, ev.mouse_row, ev.mouse_col)) |field_idx| {
+                    if (field_idx < state.form_field_count) {
+                        state.form_active_field = field_idx;
+                        syncFormPickersForActiveField(state, creation_mode);
+                    }
+                    return;
+                }
+            },
+            else => {},
+        }
+    }
+
     switch (ev.key) {
         .escape => {
+            state.resetFormUiState();
+            state.clearFormCollectionSelection();
+            state.form_collection_pick_index = null;
             state.screen = if (is_category) .category_list else .item_list;
         },
         .enter => {
@@ -2982,44 +3283,102 @@ fn handleForm(state: *TuiState, ev: KeyEvent, is_category: bool) !void {
             } else {
                 try saveItemForm(state);
             }
+            state.resetFormUiState();
+            state.clearFormCollectionSelection();
+            state.form_collection_pick_index = null;
         },
         .tab => {
             state.form_active_field = (state.form_active_field + 1) % state.form_field_count;
+            syncFormPickersForActiveField(state, creation_mode);
+        },
+        .shift_tab => {
+            state.form_active_field = if (state.form_active_field == 0)
+                state.form_field_count - 1
+            else
+                state.form_active_field - 1;
+            syncFormPickersForActiveField(state, creation_mode);
         },
         .up => {
-            if (!is_category and folderFieldIsActive(state)) {
+            if (creation_mode and folderFieldIsActive(state)) {
                 moveFolderPicker(state, -1);
+            } else if (creation_mode and collectionFieldIsActive(state)) {
+                moveFormCollectionPicker(state, -1);
+            } else if (state.form_active_field > 0) {
+                state.form_active_field -= 1;
+                syncFormPickersForActiveField(state, creation_mode);
             }
         },
         .down => {
-            if (!is_category and folderFieldIsActive(state)) {
+            if (creation_mode and folderFieldIsActive(state)) {
                 moveFolderPicker(state, 1);
+            } else if (creation_mode and collectionFieldIsActive(state)) {
+                moveFormCollectionPicker(state, 1);
+            } else {
+                state.form_active_field = (state.form_active_field + 1) % state.form_field_count;
+                syncFormPickersForActiveField(state, creation_mode);
             }
+        },
+        .left => {
+            state.form_active_field = if (state.form_active_field == 0)
+                state.form_field_count - 1
+            else
+                state.form_active_field - 1;
+            syncFormPickersForActiveField(state, creation_mode);
+        },
+        .right => {
+            state.form_active_field = (state.form_active_field + 1) % state.form_field_count;
+            syncFormPickersForActiveField(state, creation_mode);
         },
         .backspace => {
-            if (!is_category and folderFieldIsActive(state)) {
+            if (creation_mode and folderFieldIsActive(state)) {
                 state.form_folder_pick_index = null;
+                state.form_fields[folderFieldIndexForType(state.item_form_type)].clear();
+            } else if (creation_mode and collectionFieldIsActive(state)) {
+                clearFormCollections(state);
+            } else {
+                state.form_fields[state.form_active_field].deleteChar();
             }
-            state.form_fields[state.form_active_field].deleteChar();
         },
         .clear_line => {
-            if (!is_category and folderFieldIsActive(state)) {
+            if (creation_mode and folderFieldIsActive(state)) {
                 state.form_folder_pick_index = null;
+                state.form_fields[folderFieldIndexForType(state.item_form_type)].clear();
+            } else if (creation_mode and collectionFieldIsActive(state)) {
+                clearFormCollections(state);
+            } else {
+                state.form_fields[state.form_active_field].clear();
             }
-            state.form_fields[state.form_active_field].clear();
         },
         .char => |_| {
             if (!is_category and ev.char == 7 and state.item_form_type == .login) {
                 try generatePasswordInForm(state);
                 return;
             }
-            if (!is_category and ev.char == 20 and state.item_form_type == .login and state.form_active_field == 2) {
-                state.form_password_revealed = !state.form_password_revealed;
-                state.setMessage(if (state.form_password_revealed) "Password visible" else "Password hidden", false);
+            if (!is_category and ev.char == 'p' and state.item_form_type == .login and (state.form_active_field == password_field_idx or creation_mode)) {
+                if (creation_mode and state.form_active_field != password_field_idx and !folderFieldIsActive(state) and !collectionFieldIsActive(state)) {
+                    // Keep text typing intact in regular text fields.
+                } else {
+                    toggleFormPasswordReveal(state);
+                    return;
+                }
+            }
+            if (!is_category and ev.char == 'y' and creation_mode and state.item_form_type == .login and !folderFieldIsActive(state) and !collectionFieldIsActive(state) and state.form_active_field != password_field_idx) {
+                // typed as text
+            } else if (!is_category and ev.char == 'y' and creation_mode and state.item_form_type == .login) {
+                copyFormPassword(state);
                 return;
             }
-            if (!is_category and folderFieldIsActive(state)) {
+            if (!is_category and ev.char == 20 and state.item_form_type == .login) {
+                toggleFormPasswordReveal(state);
+                return;
+            }
+            if (creation_mode and collectionFieldIsActive(state)) {
+                if (ev.char == ' ') toggleCurrentFormCollection(state);
+                return;
+            }
+            if (creation_mode and folderFieldIsActive(state)) {
                 state.form_folder_pick_index = null;
+                return;
             }
             state.form_fields[state.form_active_field].appendChar(ev.char);
         },
@@ -3161,6 +3520,7 @@ test "removeContainerAtSelection deletes collection links from items" {
 pub fn run(allocator: std.mem.Allocator, session: *VaultSession) !void {
     var state = TuiState.init(allocator, session);
     defer state.clearDetailCollectionSelection();
+    defer state.clearFormCollectionSelection();
 
     // Load wordlist
     state.wordlist = bip39.loadWordlist(allocator, storage.getWordlistPath()) catch null;
