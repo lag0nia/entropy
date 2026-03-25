@@ -161,20 +161,49 @@ pub fn readPassword(allocator: std.mem.Allocator, prompt: []const u8) ![]u8 {
     }
 
     var termios = try std.posix.tcgetattr(stdin_fd);
-    const old_lflag = termios.lflag;
+    const original = termios;
     termios.lflag.ECHO = false;
+    termios.lflag.ICANON = false;
     try std.posix.tcsetattr(stdin_fd, .FLUSH, termios);
 
     defer {
         // Restore echo
-        termios.lflag = old_lflag;
-        std.posix.tcsetattr(stdin_fd, .FLUSH, termios) catch {};
+        std.posix.tcsetattr(stdin_fd, .FLUSH, original) catch {};
         // Print newline after password input
         const newline = "\n";
         _ = std.posix.write(std.fs.File.stdout().handle, newline) catch {};
     }
 
-    return (try readLine(allocator)) orelse error.EndOfStream;
+    var line: std.ArrayList(u8) = .{};
+    errdefer line.deinit(allocator);
+
+    while (true) {
+        var buf: [1]u8 = undefined;
+        const n = std.posix.read(stdin_fd, &buf) catch return error.EndOfStream;
+        if (n == 0) continue;
+
+        const c = buf[0];
+        switch (c) {
+            '\r', '\n' => break,
+            127, 8 => {
+                if (line.items.len > 0) {
+                    line.items.len -= 1;
+                    _ = std.posix.write(std.fs.File.stdout().handle, "\x08 \x08") catch {};
+                }
+            },
+            4 => {
+                if (line.items.len == 0) return error.EndOfStream;
+            },
+            else => {
+                if (c >= 32 and c < 127) {
+                    try line.append(allocator, c);
+                    _ = std.posix.write(std.fs.File.stdout().handle, "*") catch {};
+                }
+            },
+        }
+    }
+
+    return try line.toOwnedSlice(allocator);
 }
 
 /// Repeat a string N times into a buffer
