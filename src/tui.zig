@@ -48,6 +48,15 @@ const DetailButton = enum {
     generate,
 };
 
+const DetailActionButton = enum {
+    none,
+    edit,
+    delete,
+    save_field,
+    cancel_back,
+    help,
+};
+
 const DetailField = enum {
     name,
     user,
@@ -74,6 +83,12 @@ const DetailField = enum {
 const DetailFieldRow = struct {
     row: u16,
     field: DetailField,
+};
+
+const DetailFooterHotspot = struct {
+    action: DetailActionButton,
+    col_start: u16,
+    col_end: u16,
 };
 
 const DetailPopoverKind = enum {
@@ -210,6 +225,10 @@ const TuiState = struct {
     detail_field_rows: [32]DetailFieldRow = undefined,
     detail_field_row_count: usize = 0,
     detail_buttons_row: u16 = 0,
+    detail_footer_row: u16 = 0,
+    detail_footer_hotspots: [8]DetailFooterHotspot = undefined,
+    detail_footer_hotspot_count: usize = 0,
+    detail_action_hover: DetailActionButton = .none,
     detail_popover_kind: DetailPopoverKind = .none,
     detail_popover_row_start: u16 = 0,
     detail_popover_count: usize = 0,
@@ -624,7 +643,8 @@ fn drawItemDetail(w: *Writer, state: *TuiState) !void {
     }
 
     try w.writeAll("\n");
-    try drawDetailButtons(w, state, row + 1);
+    const buttons_row = row + 1;
+    try drawDetailButtons(w, state, buttons_row);
 }
 
 fn itemIndexAtMouseRow(state: *const TuiState, row: u16) ?usize {
@@ -686,6 +706,14 @@ fn detailButtonAtMouse(state: *const TuiState, row: u16, col: u16) DetailButton 
     if (col >= copy_start and col <= copy_end) return .copy;
     if (state.detail_edit_field != null and state.detail_edit_field.? == .password and col >= generate_start and col <= generate_end) {
         return .generate;
+    }
+    return .none;
+}
+
+fn detailFooterActionAtMouse(state: *const TuiState, row: u16, col: u16) DetailActionButton {
+    if (row != state.detail_footer_row) return .none;
+    for (state.detail_footer_hotspots[0..state.detail_footer_hotspot_count]) |spot| {
+        if (col >= spot.col_start and col <= spot.col_end) return spot.action;
     }
     return .none;
 }
@@ -1418,6 +1446,7 @@ fn drawHelp(w: *Writer, state: *const TuiState) !void {
     try w.writeAll("    Password edit asks confirmation each time, Ctrl+G or [generate] creates a new one\n");
     try w.writeAll("    Folder/Collections edit uses popover selection\n");
     try w.writeAll("    p reveal password, y copy password, or click [reveal]/[copy] (hover underlines)\n");
+    try w.writeAll("    Actions [edit]/[delete]/[save field]/[cancel-back]/[help] are also clickable\n");
 
     try w.print("\n  {s}Item/category forms{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    Tab/Shift+Tab next/prev field, Arrows navigate, Enter save, Esc cancel\n");
@@ -1440,13 +1469,22 @@ fn drawMessage(w: *Writer, state: *const TuiState) !void {
     }
 }
 
-fn drawFooter(w: *Writer, state: *const TuiState) !void {
+fn drawFooter(w: *Writer, state: *TuiState) !void {
+    state.detail_footer_hotspot_count = 0;
+    if (state.screen != .item_detail) state.detail_action_hover = .none;
+    if (state.screen == .item_detail and state.rows >= 2) {
+        const separator_row_1_based: u16 = state.rows - 1;
+        try w.print("\x1b[{d};1H", .{separator_row_1_based});
+    }
+
     try w.print("{s}", .{Color.bright_black});
     var i: usize = 0;
     while (i < state.cols) : (i += 1) {
         try w.writeAll(Box.horizontal);
     }
     try w.print("{s}\n", .{Color.reset});
+
+    state.detail_footer_row = if (state.screen == .item_detail and state.rows > 0) state.rows - 1 else 0;
 
     try w.writeAll(" ");
     switch (state.screen) {
@@ -1461,15 +1499,16 @@ fn drawFooter(w: *Writer, state: *const TuiState) !void {
             try drawKeyHint(w, "q", "quit");
         },
         .item_detail => {
-            try drawKeyHint(w, "e", "edit");
-            try drawKeyHint(w, "d", "delete");
-            try drawKeyHint(w, "Enter", "save field");
-            try drawKeyHint(w, "Esc", "cancel/back");
+            var col: u16 = 1;
+            try drawDetailFooterHint(w, state, &col, "e", "edit", .edit);
+            try drawDetailFooterHint(w, state, &col, "d", "delete", .delete);
+            try drawDetailFooterHint(w, state, &col, "Enter", "save field", .save_field);
+            try drawDetailFooterHint(w, state, &col, "Esc", "cancel/back", .cancel_back);
             if (state.detail_edit_field != null and state.detail_edit_field.? == .password) {
-                try drawKeyHint(w, "Ctrl+G", "generate");
+                try drawDetailFooterHint(w, state, &col, "Ctrl+G", "generate", .none);
             }
-            try drawKeyHint(w, "p", "reveal");
-            try drawKeyHint(w, "?", "help");
+            try drawDetailFooterHint(w, state, &col, "p", "reveal", .none);
+            try drawDetailFooterHint(w, state, &col, "?", "help", .help);
         },
         .category_list => {
             try drawKeyHint(w, "n", "new folder");
@@ -1489,6 +1528,44 @@ fn drawKeyHint(w: *Writer, key: []const u8, desc: []const u8) !void {
         Color.bg_bright_black, Color.bright_white, key, Color.reset,
         Color.dim,             desc,
     });
+}
+
+fn drawDetailFooterHint(
+    w: *Writer,
+    state: *TuiState,
+    col_cursor: *u16,
+    key: []const u8,
+    desc: []const u8,
+    action: DetailActionButton,
+) !void {
+    const visible_len: u16 = @intCast(key.len + desc.len + 3);
+    const start = col_cursor.*;
+    const hovered = (action != .none and state.detail_action_hover == action);
+    if (action != .none and state.detail_footer_hotspot_count < state.detail_footer_hotspots.len) {
+        const idx = state.detail_footer_hotspot_count;
+        state.detail_footer_hotspots[idx] = .{
+            .action = action,
+            .col_start = start,
+            .col_end = start + visible_len - 1,
+        };
+        state.detail_footer_hotspot_count += 1;
+    }
+
+    if (hovered) {
+        try w.print(" {s}{s}{s}{s} {s}{s}{s}{s} ", .{
+            Color.bg_bright_black,
+            Color.cyan,
+            key,
+            Color.reset,
+            Color.dim,
+            Color.underline,
+            desc,
+            Color.reset,
+        });
+    } else {
+        try drawKeyHint(w, key, desc);
+    }
+    col_cursor.* += visible_len;
 }
 
 // ─── Screen rendering ───────────────────────────────────────────────────────
@@ -2989,6 +3066,51 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
     }
 }
 
+fn openDetailClassicEdit(state: *TuiState) void {
+    const item = state.session.vault_v2.items[state.selected];
+    state.form_editing_index = state.selected;
+    prefillItemFormFromV2(state, item);
+    state.detail_hover_button = .none;
+    state.detail_hover_field = null;
+    state.detail_action_hover = .none;
+    state.screen = .item_form;
+}
+
+fn openDetailDeleteConfirm(state: *TuiState) void {
+    const selected_item = state.session.vault_v2.items[state.selected];
+    state.delete_target_name = if (selected_item.name.len > 0) selected_item.name else "(unnamed)";
+    state.delete_is_category = false;
+    state.prev_screen = .item_detail;
+    state.detail_hover_button = .none;
+    state.detail_hover_field = null;
+    state.detail_action_hover = .none;
+    state.screen = .confirm_delete;
+}
+
+fn openDetailHelp(state: *TuiState) void {
+    state.prev_screen = .item_detail;
+    state.detail_hover_button = .none;
+    state.detail_hover_field = null;
+    state.detail_action_hover = .none;
+    state.screen = .help;
+}
+
+fn detailCancelOrBack(state: *TuiState) void {
+    if (state.detail_password_confirm_pending) {
+        state.detail_password_confirm_pending = false;
+        return;
+    }
+    if (state.detail_edit_field != null) {
+        state.clearDetailEditState();
+        state.setMessage("Edit canceled", false);
+        return;
+    }
+    state.detail_hover_button = .none;
+    state.detail_hover_field = null;
+    state.detail_action_hover = .none;
+    state.screen = .item_list;
+}
+
 fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
     if (state.selected >= state.session.vault_v2.items.len) {
         state.screen = .item_list;
@@ -2997,6 +3119,13 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
 
     switch (ev.key) {
         .mouse_move => {
+            state.detail_action_hover = detailFooterActionAtMouse(state, ev.mouse_row, ev.mouse_col);
+            if (state.detail_action_hover != .none) {
+                state.detail_hover_button = .none;
+                state.detail_hover_field = null;
+                return;
+            }
+
             state.detail_hover_button = detailButtonAtMouse(state, ev.mouse_row, ev.mouse_col);
             if (state.detail_hover_button == .none) {
                 state.detail_hover_field = detailFieldAtMouse(state, ev.mouse_row, ev.mouse_col);
@@ -3025,9 +3154,30 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
                 }
             }
 
+            const menu_action = detailFooterActionAtMouse(state, ev.mouse_row, ev.mouse_col);
+            if (menu_action != .none) {
+                state.detail_action_hover = menu_action;
+                switch (menu_action) {
+                    .edit => openDetailClassicEdit(state),
+                    .delete => openDetailDeleteConfirm(state),
+                    .save_field => {
+                        if (state.detail_edit_field != null) {
+                            _ = try saveActiveDetailField(state);
+                        } else {
+                            state.setTimedMessage("No active field to save", true, 2000);
+                        }
+                    },
+                    .cancel_back => detailCancelOrBack(state),
+                    .help => openDetailHelp(state),
+                    .none => {},
+                }
+                return;
+            }
+
             const action = detailButtonAtMouse(state, ev.mouse_row, ev.mouse_col);
             if (action != .none) {
                 state.detail_hover_button = action;
+                state.detail_action_hover = .none;
                 switch (action) {
                     .generate => {
                         try generatePasswordInDetailField(state);
@@ -3054,6 +3204,7 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
             }
 
             if (detailFieldAtMouse(state, ev.mouse_row, ev.mouse_col)) |clicked_field| {
+                state.detail_action_hover = .none;
                 if (state.detail_password_confirm_pending) {
                     state.detail_password_confirm_pending = false;
                 }
@@ -3070,18 +3221,7 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
             }
         },
         .escape => {
-            if (state.detail_password_confirm_pending) {
-                state.detail_password_confirm_pending = false;
-                return;
-            }
-            if (state.detail_edit_field != null) {
-                state.clearDetailEditState();
-                state.setMessage("Edit canceled", false);
-                return;
-            }
-            state.detail_hover_button = .none;
-            state.detail_hover_field = null;
-            state.screen = .item_list;
+            detailCancelOrBack(state);
         },
         .enter => {
             if (state.detail_edit_field != null) {
@@ -3151,21 +3291,10 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
 
                 switch (ev.char) {
                     'e' => {
-                        const item = state.session.vault_v2.items[state.selected];
-                        state.form_editing_index = state.selected;
-                        prefillItemFormFromV2(state, item);
-                        state.detail_hover_button = .none;
-                        state.detail_hover_field = null;
-                        state.screen = .item_form;
+                        openDetailClassicEdit(state);
                     },
                     'd' => {
-                        const selected_item = state.session.vault_v2.items[state.selected];
-                        state.delete_target_name = if (selected_item.name.len > 0) selected_item.name else "(unnamed)";
-                        state.delete_is_category = false;
-                        state.prev_screen = .item_detail;
-                        state.detail_hover_button = .none;
-                        state.detail_hover_field = null;
-                        state.screen = .confirm_delete;
+                        openDetailDeleteConfirm(state);
                     },
                     'p' => {
                         revealPasswordInline(state, 3000);
@@ -3180,10 +3309,7 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
                         }
                     },
                     '?' => {
-                        state.prev_screen = .item_detail;
-                        state.detail_hover_button = .none;
-                        state.detail_hover_field = null;
-                        state.screen = .help;
+                        openDetailHelp(state);
                     },
                     else => {},
                 }
