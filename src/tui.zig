@@ -54,6 +54,9 @@ const DetailActionButton = enum {
     delete,
     save_field,
     cancel_back,
+    reveal,
+    copy,
+    generate,
     help,
 };
 
@@ -643,8 +646,6 @@ fn drawItemDetail(w: *Writer, state: *TuiState) !void {
     }
 
     try w.writeAll("\n");
-    const buttons_row = row + 1;
-    try drawDetailButtons(w, state, buttons_row);
 }
 
 fn itemIndexAtMouseRow(state: *const TuiState, row: u16) ?usize {
@@ -1445,8 +1446,8 @@ fn drawHelp(w: *Writer, state: *const TuiState) !void {
     try w.writeAll("    Click any field to edit inline, Enter save field, Esc cancel field\n");
     try w.writeAll("    Password edit asks confirmation each time, Ctrl+G or [generate] creates a new one\n");
     try w.writeAll("    Folder/Collections edit uses popover selection\n");
-    try w.writeAll("    p reveal password, y copy password, or click [reveal]/[copy] (hover underlines)\n");
-    try w.writeAll("    Actions [edit]/[delete]/[save field]/[cancel-back]/[help] are also clickable\n");
+    try w.writeAll("    p reveal password, y copy password\n");
+    try w.writeAll("    Footer actions are clickable: [edit]/[delete]/[save field]/[cancel-back]/[reveal]/[copy]/[help]\n");
 
     try w.print("\n  {s}Item/category forms{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    Tab/Shift+Tab next/prev field, Arrows navigate, Enter save, Esc cancel\n");
@@ -1505,9 +1506,10 @@ fn drawFooter(w: *Writer, state: *TuiState) !void {
             try drawDetailFooterHint(w, state, &col, "Enter", "save field", .save_field);
             try drawDetailFooterHint(w, state, &col, "Esc", "cancel/back", .cancel_back);
             if (state.detail_edit_field != null and state.detail_edit_field.? == .password) {
-                try drawDetailFooterHint(w, state, &col, "Ctrl+G", "generate", .none);
+                try drawDetailFooterHint(w, state, &col, "Ctrl+G", "generate", .generate);
             }
-            try drawDetailFooterHint(w, state, &col, "p", "reveal", .none);
+            try drawDetailFooterHint(w, state, &col, "p", "reveal", .reveal);
+            try drawDetailFooterHint(w, state, &col, "y", "copy", .copy);
             try drawDetailFooterHint(w, state, &col, "?", "help", .help);
         },
         .category_list => {
@@ -3125,13 +3127,8 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
                 state.detail_hover_field = null;
                 return;
             }
-
-            state.detail_hover_button = detailButtonAtMouse(state, ev.mouse_row, ev.mouse_col);
-            if (state.detail_hover_button == .none) {
-                state.detail_hover_field = detailFieldAtMouse(state, ev.mouse_row, ev.mouse_col);
-            } else {
-                state.detail_hover_field = null;
-            }
+            state.detail_hover_button = .none;
+            state.detail_hover_field = detailFieldAtMouse(state, ev.mouse_row, ev.mouse_col);
         },
         .mouse_left => {
             if (state.detail_popover_kind != .none) {
@@ -3168,23 +3165,11 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
                         }
                     },
                     .cancel_back => detailCancelOrBack(state),
-                    .help => openDetailHelp(state),
-                    .none => {},
-                }
-                return;
-            }
-
-            const action = detailButtonAtMouse(state, ev.mouse_row, ev.mouse_col);
-            if (action != .none) {
-                state.detail_hover_button = action;
-                state.detail_action_hover = .none;
-                switch (action) {
-                    .generate => {
-                        try generatePasswordInDetailField(state);
-                    },
                     .reveal => {
                         if (state.detail_edit_field == null and !state.detail_password_confirm_pending) {
                             revealPasswordInline(state, 3000);
+                        } else {
+                            state.setTimedMessage("Finish field editing first", true, 2000);
                         }
                     },
                     .copy => {
@@ -3196,8 +3181,18 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
                             } else {
                                 state.setTimedMessage("Clipboard unavailable (pbcopy/wl-copy/xclip)", true, 3000);
                             }
+                        } else {
+                            state.setTimedMessage("Finish field editing first", true, 2000);
                         }
                     },
+                    .generate => {
+                        if (state.detail_edit_field != null and state.detail_edit_field.? == .password) {
+                            try generatePasswordInDetailField(state);
+                        } else {
+                            state.setTimedMessage("Generate is available in password edit", true, 2000);
+                        }
+                    },
+                    .help => openDetailHelp(state),
                     .none => {},
                 }
                 return;
@@ -3296,10 +3291,10 @@ fn handleItemDetail(state: *TuiState, ev: KeyEvent) !void {
                     'd' => {
                         openDetailDeleteConfirm(state);
                     },
-                    'p' => {
+                    'p', 'P' => {
                         revealPasswordInline(state, 3000);
                     },
-                    'y' => {
+                    'y', 'Y' => {
                         const pw = itemPrimarySecret(state.session.vault_v2.items[state.selected]);
                         const copied = utils.copyToClipboard(state.allocator, pw) catch false;
                         if (copied) {
