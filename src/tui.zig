@@ -943,7 +943,9 @@ fn detailFieldAtMouse(state: *const TuiState, row: u16, col: u16) ?DetailField {
     if (col < 3) return null;
     for (0..state.detail_field_row_count) |i| {
         const entry = state.detail_field_rows[i];
+        // Some terminals report mouse rows with an off-by-one offset in alt-screen mode.
         if (entry.row == row) return entry.field;
+        if (row < std.math.maxInt(u16) and entry.row == row + 1) return entry.field;
     }
     return null;
 }
@@ -1447,7 +1449,7 @@ fn drawHelp(w: *Writer, state: *const TuiState) !void {
     try w.writeAll("    Password edit asks confirmation each time, Ctrl+G or [generate] creates a new one\n");
     try w.writeAll("    Folder/Collections edit uses popover selection\n");
     try w.writeAll("    p reveal password, y copy password\n");
-    try w.writeAll("    Footer actions are clickable: [edit]/[delete]/[save field]/[cancel-back]/[reveal]/[copy]/[help]\n");
+    try w.writeAll("    Footer actions are clickable and shown as action [key]\n");
 
     try w.print("\n  {s}Item/category forms{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    Tab/Shift+Tab next/prev field, Arrows navigate, Enter save, Esc cancel\n");
@@ -1500,17 +1502,18 @@ fn drawFooter(w: *Writer, state: *TuiState) !void {
             try drawKeyHint(w, "q", "quit");
         },
         .item_detail => {
-            var col: u16 = 1;
-            try drawDetailFooterHint(w, state, &col, "e", "edit", .edit);
-            try drawDetailFooterHint(w, state, &col, "d", "delete", .delete);
-            try drawDetailFooterHint(w, state, &col, "Enter", "save field", .save_field);
-            try drawDetailFooterHint(w, state, &col, "Esc", "cancel/back", .cancel_back);
-            if (state.detail_edit_field != null and state.detail_edit_field.? == .password) {
-                try drawDetailFooterHint(w, state, &col, "Ctrl+G", "generate", .generate);
+            var col: u16 = 2;
+            var full = false;
+            if (!full) full = !(try drawDetailFooterHint(w, state, &col, "e", "edit", .edit));
+            if (!full) full = !(try drawDetailFooterHint(w, state, &col, "d", "delete", .delete));
+            if (!full) full = !(try drawDetailFooterHint(w, state, &col, "Enter", "save field", .save_field));
+            if (!full) full = !(try drawDetailFooterHint(w, state, &col, "Esc", "cancel/back", .cancel_back));
+            if (!full and state.detail_edit_field != null and state.detail_edit_field.? == .password) {
+                full = !(try drawDetailFooterHint(w, state, &col, "Ctrl+G", "generate", .generate));
             }
-            try drawDetailFooterHint(w, state, &col, "p", "reveal", .reveal);
-            try drawDetailFooterHint(w, state, &col, "y", "copy", .copy);
-            try drawDetailFooterHint(w, state, &col, "?", "help", .help);
+            if (!full) full = !(try drawDetailFooterHint(w, state, &col, "p", "reveal", .reveal));
+            if (!full) full = !(try drawDetailFooterHint(w, state, &col, "y", "copy", .copy));
+            if (!full) _ = try drawDetailFooterHint(w, state, &col, "?", "help", .help);
         },
         .category_list => {
             try drawKeyHint(w, "n", "new folder");
@@ -1539,8 +1542,10 @@ fn drawDetailFooterHint(
     key: []const u8,
     desc: []const u8,
     action: DetailActionButton,
-) !void {
-    const visible_len: u16 = @intCast(key.len + desc.len + 3);
+) !bool {
+    const visible_len: u16 = @intCast(desc.len + key.len + 7);
+    if (col_cursor.* + visible_len - 1 > state.cols) return false;
+
     const start = col_cursor.*;
     const hovered = (action != .none and state.detail_action_hover == action);
     if (action != .none and state.detail_footer_hotspot_count < state.detail_footer_hotspots.len) {
@@ -1553,21 +1558,31 @@ fn drawDetailFooterHint(
         state.detail_footer_hotspot_count += 1;
     }
 
+    const hover_color = if (action == .delete) Color.red else Color.cyan;
     if (hovered) {
-        try w.print(" {s}{s}{s}{s} {s}{s}{s}{s} ", .{
+        try w.print(" {s} {s}{s}{s} {s}[{s}{s}] {s} ", .{
             Color.bg_bright_black,
-            Color.cyan,
-            key,
-            Color.reset,
-            Color.dim,
+            hover_color,
             Color.underline,
             desc,
             Color.reset,
+            hover_color,
+            key,
+            Color.reset,
         });
     } else {
-        try drawKeyHint(w, key, desc);
+        try w.print(" {s} {s}{s}{s}{s} [{s}] {s} ", .{
+            Color.bg_bright_black,
+            Color.bright_white,
+            desc,
+            Color.dim,
+            Color.bright_white,
+            key,
+            Color.reset,
+        });
     }
     col_cursor.* += visible_len;
+    return true;
 }
 
 // ─── Screen rendering ───────────────────────────────────────────────────────
