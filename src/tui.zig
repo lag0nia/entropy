@@ -174,6 +174,7 @@ const TuiState = struct {
     prev_screen: Screen = .item_list,
     selected: usize = 0,
     scroll: usize = 0,
+    item_hover_index: ?usize = null,
     rows: u16 = 24,
     cols: u16 = 80,
     running: bool = true,
@@ -489,6 +490,7 @@ fn drawItemList(w: *Writer, state: *TuiState) !void {
     const items = state.session.vault_v2.items;
 
     if (items.len == 0) {
+        state.item_hover_index = null;
         try w.writeAll("\n");
         try w.print("  {s}{s}No items yet.{s}\n", .{ Color.dim, Color.italic, Color.reset });
         try w.print("  {s}Press {s}n{s}{s} to create your first item.{s}\n\n", .{
@@ -514,9 +516,12 @@ fn drawItemList(w: *Writer, state: *TuiState) !void {
     for (state.scroll..end) |i| {
         const item = items[i];
         const is_selected = (i == state.selected);
+        const is_hovered = (state.item_hover_index != null and state.item_hover_index.? == i and !is_selected);
 
         if (is_selected) {
             try w.print("  {s}{s}{s}{s} ", .{ Color.cyan, Color.bold, Icon.arrow_right, Color.reset });
+        } else if (is_hovered) {
+            try w.print("  {s}>{s} ", .{ Color.bright_black, Color.reset });
         } else {
             try w.writeAll("    ");
         }
@@ -527,6 +532,8 @@ fn drawItemList(w: *Writer, state: *TuiState) !void {
         const name = if (item.name.len > 0) item.name else "(unnamed)";
         if (is_selected) {
             try w.print("{s}{s}{s}{s}", .{ Color.bold, Color.bright_white, name, Color.reset });
+        } else if (is_hovered) {
+            try w.print("{s}{s}{s}{s}", .{ Color.underline, Color.bright_white, name, Color.reset });
         } else {
             try w.print("{s}", .{name});
         }
@@ -535,6 +542,8 @@ fn drawItemList(w: *Writer, state: *TuiState) !void {
         if (resolveContainerLabel(state, item)) |label| {
             if (is_selected) {
                 try w.print("  {s}[{s}]{s}", .{ Color.dim, label, Color.reset });
+            } else if (is_hovered) {
+                try w.print("  {s}{s}[{s}]{s}", .{ Color.dim, Color.underline, label, Color.reset });
             } else {
                 try w.print("  {s}[{s}]{s}", .{ Color.yellow, label, Color.reset });
             }
@@ -2885,10 +2894,12 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
     switch (ev.key) {
         .mouse_move => {
             state.detail_hover_button = .none;
+            state.item_hover_index = itemIndexAtMouseRow(state, ev.mouse_row);
         },
         .mouse_left => {
             if (count == 0) return;
             if (itemIndexAtMouseRow(state, ev.mouse_row)) |idx| {
+                state.item_hover_index = idx;
                 state.selected = idx;
                 state.clearDetailEditState();
                 state.detail_hover_button = .none;
@@ -2904,6 +2915,7 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
         },
         .enter => {
             if (count > 0) {
+                state.item_hover_index = null;
                 state.clearDetailEditState();
                 state.detail_hover_button = .none;
                 state.detail_hover_field = null;
@@ -2913,32 +2925,38 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
         .char => switch (ev.char) {
             'q' => state.running = false,
             'n' => {
+                state.item_hover_index = null;
                 initItemFormForType(state, .login);
                 state.form_editing_index = null;
                 state.screen = .item_form;
             },
             '1' => {
+                state.item_hover_index = null;
                 initItemFormForType(state, .login);
                 state.form_editing_index = null;
                 state.screen = .item_form;
             },
             '2' => {
+                state.item_hover_index = null;
                 initItemFormForType(state, .secure_note);
                 state.form_editing_index = null;
                 state.screen = .item_form;
             },
             '3' => {
+                state.item_hover_index = null;
                 initItemFormForType(state, .card);
                 state.form_editing_index = null;
                 state.screen = .item_form;
             },
             '4' => {
+                state.item_hover_index = null;
                 initItemFormForType(state, .identity);
                 state.form_editing_index = null;
                 state.screen = .item_form;
             },
             'e' => {
                 if (count > 0) {
+                    state.item_hover_index = null;
                     const item = state.session.vault_v2.items[state.selected];
                     state.form_editing_index = state.selected;
                     prefillItemFormFromV2(state, item);
@@ -2947,6 +2965,7 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
             },
             'd' => {
                 if (count > 0) {
+                    state.item_hover_index = null;
                     const selected_item = state.session.vault_v2.items[state.selected];
                     state.delete_target_name = if (selected_item.name.len > 0) selected_item.name else "(unnamed)";
                     state.delete_is_category = false;
@@ -2955,10 +2974,12 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
                 }
             },
             'c' => {
+                state.item_hover_index = null;
                 state.selected = 0;
                 state.screen = .category_list;
             },
             '?' => {
+                state.item_hover_index = null;
                 state.prev_screen = .item_list;
                 state.screen = .help;
             },
