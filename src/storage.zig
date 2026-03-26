@@ -214,17 +214,15 @@ pub fn loadVaultV2(
     errdefer arena.deinit();
     const a = arena.allocator();
 
-    const v2: schema.VaultV2 = if (std.json.parseFromSlice(schema.VaultV2, a, plaintext, .{
+    const v2: schema.VaultV2 = std.json.parseFromSliceLeaky(schema.VaultV2, a, plaintext, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
-    })) |v2_parsed| blk: {
-        break :blk v2_parsed.value;
-    } else |_| blk: {
-        const v1_parsed = std.json.parseFromSlice(model.Vault, a, plaintext, .{
+    }) catch blk: {
+        const v1_parsed = std.json.parseFromSliceLeaky(model.Vault, a, plaintext, .{
             .allocate = .alloc_always,
         }) catch
             return StorageError.CorruptedVault;
-        break :blk try projectRuntimeVaultToV2(a, v1_parsed.value);
+        break :blk try projectRuntimeVaultToV2(a, v1_parsed);
     };
 
     return .{
@@ -284,17 +282,15 @@ pub fn loadVaultV2WithKey(
     errdefer arena.deinit();
     const a = arena.allocator();
 
-    const v2: schema.VaultV2 = if (std.json.parseFromSlice(schema.VaultV2, a, plaintext, .{
+    const v2: schema.VaultV2 = std.json.parseFromSliceLeaky(schema.VaultV2, a, plaintext, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
-    })) |v2_parsed| blk: {
-        break :blk v2_parsed.value;
-    } else |_| blk: {
-        const v1_parsed = std.json.parseFromSlice(model.Vault, a, plaintext, .{
+    }) catch blk: {
+        const v1_parsed = std.json.parseFromSliceLeaky(model.Vault, a, plaintext, .{
             .allocate = .alloc_always,
         }) catch
             return StorageError.CorruptedVault;
-        break :blk try projectRuntimeVaultToV2(a, v1_parsed.value);
+        break :blk try projectRuntimeVaultToV2(a, v1_parsed);
     };
 
     return .{

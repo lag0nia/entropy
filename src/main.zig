@@ -111,6 +111,7 @@ pub fn main() !void {
         };
 
         const runtime_vault = storage.projectVaultV2ToRuntime(allocator, loaded_v2.vault) catch {
+            loaded_v2.deinit();
             try w.print("{s}{s} Vault payload could not be projected to runtime view.{s}\n", .{
                 Color.red, utils.Icon.cross_mark, Color.reset,
             });
