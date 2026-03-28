@@ -60,6 +60,21 @@ const DetailActionButton = enum {
     help,
 };
 
+const ItemListFooterAction = enum {
+    none,
+    new_item,
+    new_login,
+    new_note,
+    new_card,
+    new_identity,
+    edit,
+    delete,
+    detail,
+    categories,
+    help,
+    quit,
+};
+
 const DetailField = enum {
     name,
     user,
@@ -90,6 +105,12 @@ const DetailFieldRow = struct {
 
 const DetailFooterHotspot = struct {
     action: DetailActionButton,
+    col_start: u16,
+    col_end: u16,
+};
+
+const ItemListFooterHotspot = struct {
+    action: ItemListFooterAction,
     col_start: u16,
     col_end: u16,
 };
@@ -232,6 +253,10 @@ const TuiState = struct {
     detail_footer_hotspots: [8]DetailFooterHotspot = undefined,
     detail_footer_hotspot_count: usize = 0,
     detail_action_hover: DetailActionButton = .none,
+    item_list_footer_row: u16 = 0,
+    item_list_footer_hotspots: [14]ItemListFooterHotspot = undefined,
+    item_list_footer_hotspot_count: usize = 0,
+    item_list_action_hover: ItemListFooterAction = .none,
     detail_popover_kind: DetailPopoverKind = .none,
     detail_popover_row_start: u16 = 0,
     detail_popover_count: usize = 0,
@@ -714,6 +739,14 @@ fn detailButtonAtMouse(state: *const TuiState, row: u16, col: u16) DetailButton 
 fn detailFooterActionAtMouse(state: *const TuiState, row: u16, col: u16) DetailActionButton {
     if (row != state.detail_footer_row) return .none;
     for (state.detail_footer_hotspots[0..state.detail_footer_hotspot_count]) |spot| {
+        if (col >= spot.col_start and col <= spot.col_end) return spot.action;
+    }
+    return .none;
+}
+
+fn itemListFooterActionAtMouse(state: *const TuiState, row: u16, col: u16) ItemListFooterAction {
+    if (row != state.item_list_footer_row) return .none;
+    for (state.item_list_footer_hotspots[0..state.item_list_footer_hotspot_count]) |spot| {
         if (col >= spot.col_start and col <= spot.col_end) return spot.action;
     }
     return .none;
@@ -1443,6 +1476,7 @@ fn drawHelp(w: *Writer, state: *const TuiState) !void {
 
     try w.print("  {s}Item list{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    Up/Down navigate, Enter detail, mouse click open, n/1 login, 2 note, 3 card, 4 identity, e edit, d delete, c categories, q quit\n");
+    try w.writeAll("    Footer actions are clickable and shown as action [key]\n");
 
     try w.print("\n  {s}Item detail{s}\n", .{ Color.cyan, Color.reset });
     try w.writeAll("    Click any field to edit inline, Enter save field, Esc cancel field\n");
@@ -1475,7 +1509,11 @@ fn drawMessage(w: *Writer, state: *const TuiState) !void {
 fn drawFooter(w: *Writer, state: *TuiState) !void {
     state.detail_footer_hotspot_count = 0;
     if (state.screen != .item_detail) state.detail_action_hover = .none;
-    if (state.screen == .item_detail and state.rows >= 2) {
+    state.item_list_footer_hotspot_count = 0;
+    if (state.screen != .item_list) state.item_list_action_hover = .none;
+
+    const pinned_footer = (state.screen == .item_detail or state.screen == .item_list);
+    if (pinned_footer and state.rows >= 2) {
         const separator_row_1_based: u16 = state.rows - 1;
         try w.print("\x1b[{d};1H", .{separator_row_1_based});
     }
@@ -1488,18 +1526,24 @@ fn drawFooter(w: *Writer, state: *TuiState) !void {
     try w.print("{s}\n", .{Color.reset});
 
     state.detail_footer_row = if (state.screen == .item_detail and state.rows > 0) state.rows - 1 else 0;
+    state.item_list_footer_row = if (state.screen == .item_list and state.rows > 0) state.rows - 1 else 0;
 
     try w.writeAll(" ");
     switch (state.screen) {
         .item_list => {
-            try drawKeyHint(w, "n", "new");
-            try drawKeyHint(w, "1..4", "new type");
-            try drawKeyHint(w, "e", "edit");
-            try drawKeyHint(w, "d", "delete");
-            try drawKeyHint(w, "Enter", "detail");
-            try drawKeyHint(w, "c", "categories");
-            try drawKeyHint(w, "?", "help");
-            try drawKeyHint(w, "q", "quit");
+            var col: u16 = 2;
+            var full = false;
+            if (!full) full = !(try drawItemListFooterHint(w, state, &col, "n", "new", .new_item));
+            if (!full) full = !(try drawItemListFooterHint(w, state, &col, "1", "login", .new_login));
+            if (!full) full = !(try drawItemListFooterHint(w, state, &col, "2", "note", .new_note));
+            if (!full) full = !(try drawItemListFooterHint(w, state, &col, "3", "card", .new_card));
+            if (!full) full = !(try drawItemListFooterHint(w, state, &col, "4", "identity", .new_identity));
+            if (!full) full = !(try drawItemListFooterHint(w, state, &col, "e", "edit", .edit));
+            if (!full) full = !(try drawItemListFooterHint(w, state, &col, "d", "delete", .delete));
+            if (!full) full = !(try drawItemListFooterHint(w, state, &col, "Enter", "detail", .detail));
+            if (!full) full = !(try drawItemListFooterHint(w, state, &col, "c", "categories", .categories));
+            if (!full) full = !(try drawItemListFooterHint(w, state, &col, "?", "help", .help));
+            if (!full) _ = try drawItemListFooterHint(w, state, &col, "q", "quit", .quit);
         },
         .item_detail => {
             var col: u16 = 2;
@@ -1558,25 +1602,75 @@ fn drawDetailFooterHint(
         state.detail_footer_hotspot_count += 1;
     }
 
-    const hover_color = if (action == .delete) Color.red else Color.cyan;
     if (hovered) {
-        try w.print(" {s} {s}{s}{s} {s}[{s}{s}] {s} ", .{
-            Color.bg_bright_black,
-            hover_color,
-            Color.underline,
+        try w.print(" {s}▪{s} {s}{s}{s} [{s}{s}{s}] ", .{
+            Color.cyan,
+            Color.reset,
+            Color.cyan,
             desc,
             Color.reset,
-            hover_color,
+            Color.cyan,
             key,
             Color.reset,
         });
     } else {
-        try w.print(" {s} {s}{s}{s}{s} [{s}] {s} ", .{
-            Color.bg_bright_black,
+        try w.print(" {s}▪{s} {s}{s}{s} [{s}{s}{s}] ", .{
+            Color.magenta,
+            Color.reset,
             Color.bright_white,
             desc,
-            Color.dim,
+            Color.reset,
+            Color.bright_magenta,
+            key,
+            Color.reset,
+        });
+    }
+    col_cursor.* += visible_len;
+    return true;
+}
+
+fn drawItemListFooterHint(
+    w: *Writer,
+    state: *TuiState,
+    col_cursor: *u16,
+    key: []const u8,
+    desc: []const u8,
+    action: ItemListFooterAction,
+) !bool {
+    const visible_len: u16 = @intCast(desc.len + key.len + 7);
+    if (col_cursor.* + visible_len - 1 > state.cols) return false;
+
+    const start = col_cursor.*;
+    const hovered = (action != .none and state.item_list_action_hover == action);
+    if (action != .none and state.item_list_footer_hotspot_count < state.item_list_footer_hotspots.len) {
+        const idx = state.item_list_footer_hotspot_count;
+        state.item_list_footer_hotspots[idx] = .{
+            .action = action,
+            .col_start = start,
+            .col_end = start + visible_len - 1,
+        };
+        state.item_list_footer_hotspot_count += 1;
+    }
+
+    if (hovered) {
+        try w.print(" {s}▪{s} {s}{s}{s} [{s}{s}{s}] ", .{
+            Color.cyan,
+            Color.reset,
+            Color.cyan,
+            desc,
+            Color.reset,
+            Color.cyan,
+            key,
+            Color.reset,
+        });
+    } else {
+        try w.print(" {s}▪{s} {s}{s}{s} [{s}{s}{s}] ", .{
+            Color.magenta,
+            Color.reset,
             Color.bright_white,
+            desc,
+            Color.reset,
+            Color.bright_magenta,
             key,
             Color.reset,
         });
@@ -2983,22 +3077,98 @@ fn handleInput(state: *TuiState, ev: KeyEvent) !void {
     }
 }
 
+fn openItemListNew(state: *TuiState, item_type: schema.ItemType) void {
+    state.item_hover_index = null;
+    state.item_list_action_hover = .none;
+    initItemFormForType(state, item_type);
+    state.form_editing_index = null;
+    state.screen = .item_form;
+}
+
+fn openItemListDetail(state: *TuiState) void {
+    state.item_hover_index = null;
+    state.item_list_action_hover = .none;
+    state.clearDetailEditState();
+    state.detail_hover_button = .none;
+    state.detail_hover_field = null;
+    state.screen = .item_detail;
+}
+
+fn openItemListEdit(state: *TuiState) void {
+    state.item_hover_index = null;
+    state.item_list_action_hover = .none;
+    const item = state.session.vault_v2.items[state.selected];
+    state.form_editing_index = state.selected;
+    prefillItemFormFromV2(state, item);
+    state.screen = .item_form;
+}
+
+fn openItemListDeleteConfirm(state: *TuiState) void {
+    state.item_hover_index = null;
+    state.item_list_action_hover = .none;
+    const selected_item = state.session.vault_v2.items[state.selected];
+    state.delete_target_name = if (selected_item.name.len > 0) selected_item.name else "(unnamed)";
+    state.delete_is_category = false;
+    state.prev_screen = .item_list;
+    state.screen = .confirm_delete;
+}
+
+fn openItemListCategories(state: *TuiState) void {
+    state.item_hover_index = null;
+    state.item_list_action_hover = .none;
+    state.selected = 0;
+    state.screen = .category_list;
+}
+
+fn openItemListHelp(state: *TuiState) void {
+    state.item_hover_index = null;
+    state.item_list_action_hover = .none;
+    state.prev_screen = .item_list;
+    state.screen = .help;
+}
+
+fn performItemListAction(state: *TuiState, action: ItemListFooterAction) void {
+    const count = state.session.vault_v2.items.len;
+    switch (action) {
+        .new_item, .new_login => openItemListNew(state, .login),
+        .new_note => openItemListNew(state, .secure_note),
+        .new_card => openItemListNew(state, .card),
+        .new_identity => openItemListNew(state, .identity),
+        .edit => if (count > 0) openItemListEdit(state),
+        .delete => if (count > 0) openItemListDeleteConfirm(state),
+        .detail => if (count > 0) openItemListDetail(state),
+        .categories => openItemListCategories(state),
+        .help => openItemListHelp(state),
+        .quit => state.running = false,
+        .none => {},
+    }
+}
+
 fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
     const count = state.session.vault_v2.items.len;
     switch (ev.key) {
         .mouse_move => {
             state.detail_hover_button = .none;
-            state.item_hover_index = itemIndexAtMouseRow(state, ev.mouse_row);
+            state.item_list_action_hover = itemListFooterActionAtMouse(state, ev.mouse_row, ev.mouse_col);
+            if (state.item_list_action_hover != .none) {
+                state.item_hover_index = null;
+            } else {
+                state.item_hover_index = itemIndexAtMouseRow(state, ev.mouse_row);
+            }
         },
         .mouse_left => {
+            const footer_action = itemListFooterActionAtMouse(state, ev.mouse_row, ev.mouse_col);
+            if (footer_action != .none) {
+                state.item_list_action_hover = footer_action;
+                performItemListAction(state, footer_action);
+                return;
+            }
+            state.item_list_action_hover = .none;
             if (count == 0) return;
             if (itemIndexAtMouseRow(state, ev.mouse_row)) |idx| {
                 state.item_hover_index = idx;
                 state.selected = idx;
-                state.clearDetailEditState();
-                state.detail_hover_button = .none;
-                state.detail_hover_field = null;
-                state.screen = .item_detail;
+                openItemListDetail(state);
             }
         },
         .up => {
@@ -3009,74 +3179,20 @@ fn handleItemList(state: *TuiState, ev: KeyEvent) !void {
         },
         .enter => {
             if (count > 0) {
-                state.item_hover_index = null;
-                state.clearDetailEditState();
-                state.detail_hover_button = .none;
-                state.detail_hover_field = null;
-                state.screen = .item_detail;
+                performItemListAction(state, .detail);
             }
         },
         .char => switch (ev.char) {
-            'q' => state.running = false,
-            'n' => {
-                state.item_hover_index = null;
-                initItemFormForType(state, .login);
-                state.form_editing_index = null;
-                state.screen = .item_form;
-            },
-            '1' => {
-                state.item_hover_index = null;
-                initItemFormForType(state, .login);
-                state.form_editing_index = null;
-                state.screen = .item_form;
-            },
-            '2' => {
-                state.item_hover_index = null;
-                initItemFormForType(state, .secure_note);
-                state.form_editing_index = null;
-                state.screen = .item_form;
-            },
-            '3' => {
-                state.item_hover_index = null;
-                initItemFormForType(state, .card);
-                state.form_editing_index = null;
-                state.screen = .item_form;
-            },
-            '4' => {
-                state.item_hover_index = null;
-                initItemFormForType(state, .identity);
-                state.form_editing_index = null;
-                state.screen = .item_form;
-            },
-            'e' => {
-                if (count > 0) {
-                    state.item_hover_index = null;
-                    const item = state.session.vault_v2.items[state.selected];
-                    state.form_editing_index = state.selected;
-                    prefillItemFormFromV2(state, item);
-                    state.screen = .item_form;
-                }
-            },
-            'd' => {
-                if (count > 0) {
-                    state.item_hover_index = null;
-                    const selected_item = state.session.vault_v2.items[state.selected];
-                    state.delete_target_name = if (selected_item.name.len > 0) selected_item.name else "(unnamed)";
-                    state.delete_is_category = false;
-                    state.prev_screen = .item_list;
-                    state.screen = .confirm_delete;
-                }
-            },
-            'c' => {
-                state.item_hover_index = null;
-                state.selected = 0;
-                state.screen = .category_list;
-            },
-            '?' => {
-                state.item_hover_index = null;
-                state.prev_screen = .item_list;
-                state.screen = .help;
-            },
+            'q', 'Q' => performItemListAction(state, .quit),
+            'n', 'N' => performItemListAction(state, .new_item),
+            '1' => performItemListAction(state, .new_login),
+            '2' => performItemListAction(state, .new_note),
+            '3' => performItemListAction(state, .new_card),
+            '4' => performItemListAction(state, .new_identity),
+            'e', 'E' => performItemListAction(state, .edit),
+            'd', 'D' => performItemListAction(state, .delete),
+            'c', 'C' => performItemListAction(state, .categories),
+            '?' => performItemListAction(state, .help),
             else => {},
         },
         else => {},
